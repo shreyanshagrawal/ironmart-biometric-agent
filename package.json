@@ -1,0 +1,14 @@
+{
+  "name": "ironmart-biometric-agent",
+  "version": "1.0.0",
+  "description": "Standalone office-LAN agent that polls the ESSL K30 biometric device and pushes punch logs to the IronMart HRMS backend over HTTPS. Runs outside the VPS Docker Compose stack — see README.md.",
+  "type": "module",
+  "private": true,
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "node-zklib": "^1.3.0"
+  }
+}
