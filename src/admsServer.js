@@ -96,7 +96,9 @@ export function startAdmsServer({ port, onPunchBatch, getLastSyncedUnixSec }) {
   const server = createServer((req, res) => {
     const rawUrl = req.url ?? "/";
     const url = new URL(rawUrl, "http://localhost");
-    const pathname = url.pathname;
+    // Some eSSL firmware variants append .aspx to every path
+    // (e.g. /iclock/cdata.aspx). Strip it so one set of handlers covers both.
+    const pathname = url.pathname.replace(/\.aspx$/i, "");
     const sn    = url.searchParams.get("SN")    ?? "unknown";
     const table = url.searchParams.get("table") ?? "";
 
