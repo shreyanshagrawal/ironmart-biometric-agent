@@ -51,6 +51,12 @@ function createTCPHeader(command, sessionId, replyId, data) {
   buf.writeUInt16LE(replyId, 6);
   dataBuffer.copy(buf, 8);
   buf.writeUInt16LE(createChkSum(buf), 2);
+  // The real library increments replyId by 1 AFTER computing the checksum
+  // and rewrites it into the packet — the checksum itself is computed
+  // against the pre-increment value, but the byte actually sent is the
+  // incremented one. Missing this step was the bug in the first version of
+  // this script (sent replyId=0 instead of 1 for the very first request).
+  buf.writeUInt16LE((replyId + 1) % USHRT_MAX, 6);
   const prefixBuf = Buffer.from([0x50, 0x50, 0x82, 0x7d, 0x13, 0x00, 0x00, 0x00]);
   prefixBuf.writeUInt16LE(buf.length, 4);
   return Buffer.concat([prefixBuf, buf]);
