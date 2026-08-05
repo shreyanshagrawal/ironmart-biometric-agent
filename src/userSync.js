@@ -4,7 +4,7 @@
 // VPS) has no network route to the device's office-LAN address. Mirrors the
 // punch-log direction in reverse: there the agent pushes data the backend
 // consumes; here the backend queues work the agent consumes.
-import { logger } from "./logger.js";
+import { logger, describeError } from "./logger.js";
 
 const MIN_UID = 1;
 const MAX_UID = 3000; // zkteco-js's own setUser/deleteUser validate this range
@@ -92,7 +92,7 @@ export async function runUserSyncCycle({ ZKLib, esslIp, esslPort, vpsBaseUrl, de
     // silently Pending forever (which would look identical to "nobody's
     // looked at this yet" on the HR-facing Device User Sync screen).
     for (const job of jobs) {
-      await ackJob(vpsBaseUrl, deviceAgentToken, job.id, "Failed", `Device unreachable: ${err.message}`);
+      await ackJob(vpsBaseUrl, deviceAgentToken, job.id, "Failed", `Device unreachable: ${describeError(err)}`);
     }
     throw err;
   }
@@ -107,8 +107,9 @@ export async function runUserSyncCycle({ ZKLib, esslIp, esslPort, vpsBaseUrl, de
         logger.info(`Synced: ${job.action} ${job.employeeName} (${job.biometricDeviceCode ?? "n/a"})`);
         succeeded++;
       } catch (err) {
-        await ackJob(vpsBaseUrl, deviceAgentToken, job.id, "Failed", err.message);
-        logger.error(`Failed: ${job.action} ${job.employeeName} — ${err.message}`);
+        const message = describeError(err);
+        await ackJob(vpsBaseUrl, deviceAgentToken, job.id, "Failed", message);
+        logger.error(`Failed: ${job.action} ${job.employeeName} — ${message}`);
         failed++;
       }
     }

@@ -33,3 +33,22 @@ export const logger = {
   warn: (msg) => write("WARN", msg),
   error: (msg) => write("ERROR", msg),
 };
+
+// zkteco-js throws a non-standard error shape in several places (its own
+// `ZkError`/`Errors` class in src/exceptions/handler.js does NOT extend the
+// native Error class — it's a plain {err, ip, command} object with no
+// `.message` of its own, the real message lives at `.err.message`).
+// `err.message` on one of these is always undefined, which silently
+// produced "Poll failed: undefined" instead of a real reason. This pulls a
+// real message out of whatever shape the error actually is.
+export function describeError(err) {
+  if (!err) return "Unknown error";
+  if (typeof err === "string") return err;
+  if (err.err?.message) return err.err.message; // zkteco-js's ZkError shape
+  if (err.message) return err.message; // a real Error instance
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}

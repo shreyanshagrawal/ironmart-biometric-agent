@@ -6,7 +6,7 @@
 // VPS) has no network route to this device's private LAN address.
 import ZKLib from "zkteco-js";
 import { loadState, saveState } from "./state.js";
-import { logger } from "./logger.js";
+import { logger, describeError } from "./logger.js";
 import { runUserSyncCycle } from "./userSync.js";
 
 // --- Process-level safety net for a confirmed real bug in zkteco-js ---
@@ -25,11 +25,11 @@ import { runUserSyncCycle } from "./userSync.js";
 // change or suppress how runOnce()'s own error handling behaves.
 process.on("unhandledRejection", (reason) => {
   logger.error(
-    `Unhandled promise rejection (likely the known zkteco-js readWithBuffer bug — see README "Known limitations") — agent continues running: ${reason?.message || reason}`
+    `Unhandled promise rejection (likely the known zkteco-js readWithBuffer bug — see README "Known limitations") — agent continues running: ${describeError(reason)}`
   );
 });
 process.on("uncaughtException", (err) => {
-  logger.error(`Uncaught exception — agent continues running: ${err?.message || err}`);
+  logger.error(`Uncaught exception — agent continues running: ${describeError(err)}`);
 });
 
 const ESSL_DEVICE_IP = process.env.ESSL_DEVICE_IP || "192.168.1.201";
@@ -161,7 +161,7 @@ async function runOnce() {
     consecutiveFailures = 0;
   } catch (err) {
     consecutiveFailures++;
-    logger.error(`Poll failed (${consecutiveFailures} consecutive): ${err.message}`);
+    logger.error(`Poll failed (${consecutiveFailures} consecutive): ${describeError(err)}`);
     if (consecutiveFailures === CONSECUTIVE_FAILURE_WARNING_THRESHOLD) {
       const downForMinutes = consecutiveFailures * POLL_INTERVAL_MINUTES;
       logger.warn(
