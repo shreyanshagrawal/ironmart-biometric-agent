@@ -67,8 +67,29 @@ async function fetchLogsFromDevice() {
   const zk = new ZKLib(ESSL_DEVICE_IP, ESSL_DEVICE_PORT, ESSL_DEVICE_TIMEOUT_MS, 4000);
   try {
     await zk.createSocket();
-    const result = await zk.getAttendances();
-    return result?.data || [];
+    // Disable the device before pulling the log and re-enable it right
+    // after — a real, standard ZK protocol pattern this library's own
+    // getAttendances() doesn't do on its own. Without it, some firmware
+    // stays "live" (still able to accept a punch / run a fingerprint scan)
+    // mid-transfer, and can simply never get around to replying to the
+    // data request within any timeout — indistinguishable from a network
+    // problem in the logs, but actually a device-busy issue. Best-effort:
+    // if disable itself fails, still attempt the read rather than aborting
+    // the whole poll over it.
+    await zk.disableDevice().catch((err) => {
+      logger.warn(`Could not disable device before read (continuing anyway): ${describeError(err)}`);
+    });
+    try {
+      const result = await zk.getAttendances();
+      return result?.data || [];
+    } finally {
+      // Always try to re-enable, even if the read itself failed — a device
+      // left disabled would silently stop accepting real punches until the
+      // next successful poll, which is worse than the original bug.
+      await zk.enableDevice().catch((err) => {
+        logger.warn(`Could not re-enable device after read: ${describeError(err)}`);
+      });
+    }
   } finally {
     await zk.disconnect().catch(() => {});
   }
