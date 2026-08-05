@@ -29,7 +29,10 @@ Write-Host "Node.js: $nodePath"
 
 # --- Main agent task: starts at boot, restarts automatically if it exits ---
 $agentTaskName = "IronMartBiometricAgent"
-$agentAction = New-ScheduledTaskAction -Execute $nodePath -Argument "src\index.js" -WorkingDirectory $repoDir
+# --env-file=.env is required here: Scheduled Tasks don't load .env on
+# their own any more than a plain `node src/index.js` does — see the same
+# note in README.md's Quick Start section.
+$agentAction = New-ScheduledTaskAction -Execute $nodePath -Argument "--env-file=.env src\index.js" -WorkingDirectory $repoDir
 $agentTrigger = New-ScheduledTaskTrigger -AtStartup
 $agentSettings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `

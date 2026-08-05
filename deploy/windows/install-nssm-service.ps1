@@ -39,7 +39,9 @@ if (-not $nodePath) {
 $serviceName = "IronMartBiometricAgent"
 
 Write-Host "Installing '$serviceName' as a Windows Service via NSSM..."
-& $nssm install $serviceName $nodePath "src\index.js"
+# --env-file=.env is required: NSSM does not load .env on its own, same as
+# a plain `node src/index.js` — see README.md's Quick Start note.
+& $nssm install $serviceName $nodePath "--env-file=.env src\index.js"
 & $nssm set $serviceName AppDirectory $repoDir
 & $nssm set $serviceName AppEnvironmentExtra "NODE_ENV=production"
 & $nssm set $serviceName AppStdout (Join-Path $repoDir "logs\service-stdout.log")

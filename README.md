@@ -67,8 +67,11 @@ cd ironmart-biometric-agent
 cp .env.example .env
 # edit .env: real device IP, the VPS ingest URL, and the shared token
 npm install
-node src/index.js
+npm start
+# equivalent to: node --env-file=.env src/index.js
 ```
+
+`src/index.js` reads config purely from `process.env` — it does **not** load `.env` on its own (no `dotenv`, no implicit loading). `--env-file=.env` (Node 20.6+) is what actually gets those variables into the process; running plain `node src/index.js` will fail immediately with `VPS_INGEST_URL is required` / `DEVICE_AGENT_TOKEN is required` even with a correctly-filled-in `.env` sitting right next to it — `npm start` already has the flag baked in via `package.json`, so prefer it over calling `node` directly unless you have a reason not to.
 
 This runs in the foreground — fine for testing, but you'll want it running
 as a real service that survives a reboot. See the platform-specific setup

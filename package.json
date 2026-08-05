@@ -6,7 +6,7 @@
   "private": true,
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node --env-file=.env src/index.js"
   },
   "dependencies": {
     "zkteco-js": "^1.7.2"
