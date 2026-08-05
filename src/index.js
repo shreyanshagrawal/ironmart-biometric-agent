@@ -9,8 +9,37 @@ import { loadState, saveState } from "./state.js";
 import { logger } from "./logger.js";
 import { runUserSyncCycle } from "./userSync.js";
 
+// --- Process-level safety net for a confirmed real bug in zkteco-js ---
+// `readWithBuffer` in zkteco-js's ztcp.js calls `reject(err)` on a device
+// timeout but is missing a `return` afterward, so it falls through into
+// `decodeTCPHeader(reply.subarray(...))` with `reply` still null. That
+// throw happens inside an unawaited async Promise executor — a completely
+// separate, orphaned promise from the one our own code actually awaits
+// (which is already correctly rejected by the earlier `reject(err)` call
+// and handled normally by runOnce()'s try/catch below). Node's default
+// behavior is to kill the whole process on ANY unhandled rejection,
+// regardless of whether some other, unrelated promise chain is handling a
+// similarly-shaped error correctly — which would silently defeat this
+// agent's entire "log it, retry next poll" design on the very first device
+// timeout. These handlers just stop Node from doing that; they don't
+// change or suppress how runOnce()'s own error handling behaves.
+process.on("unhandledRejection", (reason) => {
+  logger.error(
+    `Unhandled promise rejection (likely the known zkteco-js readWithBuffer bug — see README "Known limitations") — agent continues running: ${reason?.message || reason}`
+  );
+});
+process.on("uncaughtException", (err) => {
+  logger.error(`Uncaught exception — agent continues running: ${err?.message || err}`);
+});
+
 const ESSL_DEVICE_IP = process.env.ESSL_DEVICE_IP || "192.168.1.201";
 const ESSL_DEVICE_PORT = parseInt(process.env.ESSL_DEVICE_PORT || "4370", 10);
+// How long to wait for the device to respond before zkteco-js times out a
+// request. 10s (the old hardcoded default) proved too tight against real
+// hardware — a device with a large attendance log or a weaker LAN link can
+// genuinely take longer than that to respond. Configurable so this can be
+// tuned per-site without a code change.
+const ESSL_DEVICE_TIMEOUT_MS = parseInt(process.env.ESSL_DEVICE_TIMEOUT_MS || "20000", 10);
 const VPS_INGEST_URL = process.env.VPS_INGEST_URL; // e.g. https://hrms.example.com/api/v1/attendance/device-logs/ingest
 const DEVICE_AGENT_TOKEN = process.env.DEVICE_AGENT_TOKEN;
 const POLL_INTERVAL_MINUTES = parseFloat(process.env.POLL_INTERVAL_MINUTES || "5");
@@ -35,7 +64,7 @@ if (!DEVICE_AGENT_TOKEN) {
 const VPS_BASE_URL = VPS_INGEST_URL.replace(/\/attendance\/device-logs\/ingest\/?$/, "/attendance");
 
 async function fetchLogsFromDevice() {
-  const zk = new ZKLib(ESSL_DEVICE_IP, ESSL_DEVICE_PORT, 10000, 4000);
+  const zk = new ZKLib(ESSL_DEVICE_IP, ESSL_DEVICE_PORT, ESSL_DEVICE_TIMEOUT_MS, 4000);
   try {
     await zk.createSocket();
     const result = await zk.getAttendances();
@@ -113,6 +142,7 @@ async function syncDeviceUsers() {
     esslPort: ESSL_DEVICE_PORT,
     vpsBaseUrl: VPS_BASE_URL,
     deviceAgentToken: DEVICE_AGENT_TOKEN,
+    esslTimeoutMs: ESSL_DEVICE_TIMEOUT_MS,
   });
   if (result.processed > 0) {
     logger.info(`Device user sync: ${result.succeeded ?? 0} succeeded, ${result.failed ?? 0} failed.`);

@@ -76,12 +76,12 @@ async function applyJob(zk, job) {
 
 /** Runs one poll cycle: fetch pending jobs, connect once, apply each job in
  *  turn (one bad job doesn't block the rest), disconnect, ack every result. */
-export async function runUserSyncCycle({ ZKLib, esslIp, esslPort, vpsBaseUrl, deviceAgentToken }) {
+export async function runUserSyncCycle({ ZKLib, esslIp, esslPort, vpsBaseUrl, deviceAgentToken, esslTimeoutMs = 10000 }) {
   const jobs = await fetchPendingJobs(vpsBaseUrl, deviceAgentToken);
   if (jobs.length === 0) return { processed: 0 };
 
   logger.info(`Found ${jobs.length} pending device-user sync job(s).`);
-  const zk = new ZKLib(esslIp, esslPort, 10000, 4000);
+  const zk = new ZKLib(esslIp, esslPort, esslTimeoutMs, 4000);
   let connected = false;
   try {
     await zk.createSocket();
