@@ -39,7 +39,7 @@ const ESSL_DEVICE_PORT = parseInt(process.env.ESSL_DEVICE_PORT || "4370", 10);
 // hardware — a device with a large attendance log or a weaker LAN link can
 // genuinely take longer than that to respond. Configurable so this can be
 // tuned per-site without a code change.
-const ESSL_DEVICE_TIMEOUT_MS = parseInt(process.env.ESSL_DEVICE_TIMEOUT_MS || "20000", 10);
+const ESSL_DEVICE_TIMEOUT_MS = parseInt(process.env.ESSL_DEVICE_TIMEOUT_MS || "60000", 10);
 const VPS_INGEST_URL = process.env.VPS_INGEST_URL; // e.g. https://hrms.example.com/api/v1/attendance/device-logs/ingest
 const DEVICE_AGENT_TOKEN = process.env.DEVICE_AGENT_TOKEN;
 const POLL_INTERVAL_MINUTES = parseFloat(process.env.POLL_INTERVAL_MINUTES || "5");
