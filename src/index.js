@@ -67,6 +67,22 @@ async function fetchLogsFromDevice() {
   const zk = new ZKLib(ESSL_DEVICE_IP, ESSL_DEVICE_PORT, ESSL_DEVICE_TIMEOUT_MS, 4000);
   try {
     await zk.createSocket();
+
+    // Diagnostic probe: a lightweight command (device serial/user/log
+    // counts, no bulk transfer) run before the real attendance pull, purely
+    // to tell whether the device responds to ANY post-connect command at
+    // all, or specifically stalls on the larger attendance-log transfer.
+    // If this line itself times out, that points at something more
+    // fundamental (network/competing session/device busy) rather than
+    // anything specific to the bulk-data path. Safe to remove once the real
+    // timeout is diagnosed — this doesn't change behavior, only logs more.
+    try {
+      const info = await zk.getInfo();
+      logger.info(`Diagnostic getInfo() succeeded: ${JSON.stringify(info)}`);
+    } catch (err) {
+      logger.warn(`Diagnostic getInfo() FAILED (device isn't responding to even a lightweight command): ${describeError(err)}`);
+    }
+
     // Disable the device before pulling the log and re-enable it right
     // after — a real, standard ZK protocol pattern this library's own
     // getAttendances() doesn't do on its own. Without it, some firmware
