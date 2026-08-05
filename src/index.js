@@ -68,19 +68,23 @@ async function fetchLogsFromDevice() {
   try {
     await zk.createSocket();
 
-    // Diagnostic probe: a lightweight command (device serial/user/log
-    // counts, no bulk transfer) run before the real attendance pull, purely
-    // to tell whether the device responds to ANY post-connect command at
-    // all, or specifically stalls on the larger attendance-log transfer.
-    // If this line itself times out, that points at something more
-    // fundamental (network/competing session/device busy) rather than
-    // anything specific to the bulk-data path. Safe to remove once the real
-    // timeout is diagnosed — this doesn't change behavior, only logs more.
+    // Diagnostic probe: CMD_GET_FREE_SIZES (50) sent directly via the
+    // library's internal executeCmd, bypassing zkteco-js's own getInfo()
+    // wrapper — that wrapper crashed with a real RangeError trying to parse
+    // this device's actual reply as if it were the 76+ byte payload it
+    // expects (userCounts at offset 24, logCounts at 40, logCapacity at
+    // 72), but this device's reply is only 8 bytes. That's a genuine
+    // firmware/protocol difference from what the library assumes, not a
+    // timeout — the device replied fine, just with a shorter payload. This
+    // logs the RAW bytes so we can see exactly what this device actually
+    // sends, instead of continuing to guess. Safe to remove once diagnosed.
     try {
-      const info = await zk.getInfo();
-      logger.info(`Diagnostic getInfo() succeeded: ${JSON.stringify(info)}`);
+      const rawReply = await zk.ztcp.executeCmd(50 /* CMD_GET_FREE_SIZES */, "");
+      logger.info(
+        `Diagnostic CMD_GET_FREE_SIZES raw reply: length=${rawReply?.length ?? "null"} hex=${rawReply ? rawReply.toString("hex") : "null"}`
+      );
     } catch (err) {
-      logger.warn(`Diagnostic getInfo() FAILED (device isn't responding to even a lightweight command): ${describeError(err)}`);
+      logger.warn(`Diagnostic CMD_GET_FREE_SIZES FAILED (device isn't responding to even a lightweight command): ${describeError(err)}`);
     }
 
     // Disable the device before pulling the log and re-enable it right
