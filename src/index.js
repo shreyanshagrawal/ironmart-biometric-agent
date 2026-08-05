@@ -1,29 +1,38 @@
 // @ts-nocheck
-// Standalone agent: polls the ESSL K30 biometric device on the office LAN
-// and pushes new punch logs to the IronMart HRMS backend over HTTPS.
-//
-// This deliberately mirrors backend/src/integrations/attendance/providers/EsslProvider.ts's
-// connection + log-parsing logic (same node-zklib call shape, same field
-// mapping) so the pushed payload needs no reshaping on the backend side —
-// AttendanceSyncService.ingestRawLogs consumes it identically to the
-// pull-based path.
-import ZKLib from "node-zklib";
+// Standalone agent: polls the ESSL K30 biometric device on the office LAN,
+// pushes new punch logs to the IronMart HRMS backend, and pulls pending
+// "enroll/remove this employee" jobs from the backend to apply to the
+// device — the only two directions that work, since the backend (on the
+// VPS) has no network route to this device's private LAN address.
+import ZKLib from "zkteco-js";
 import { loadState, saveState } from "./state.js";
+import { logger } from "./logger.js";
+import { runUserSyncCycle } from "./userSync.js";
 
 const ESSL_DEVICE_IP = process.env.ESSL_DEVICE_IP || "192.168.1.201";
 const ESSL_DEVICE_PORT = parseInt(process.env.ESSL_DEVICE_PORT || "4370", 10);
 const VPS_INGEST_URL = process.env.VPS_INGEST_URL; // e.g. https://hrms.example.com/api/v1/attendance/device-logs/ingest
 const DEVICE_AGENT_TOKEN = process.env.DEVICE_AGENT_TOKEN;
 const POLL_INTERVAL_MINUTES = parseFloat(process.env.POLL_INTERVAL_MINUTES || "5");
+// After this many consecutive failed polls, log a single escalated warning
+// (not on every failure — that would just be noise) so "the device has
+// actually been down for a while" is visible in the log file, not just
+// buried among ordinary transient blips.
+const CONSECUTIVE_FAILURE_WARNING_THRESHOLD = 3;
 
 if (!VPS_INGEST_URL) {
-  console.error("VPS_INGEST_URL is required (e.g. https://hrms.example.com/api/v1/attendance/device-logs/ingest)");
+  logger.error("VPS_INGEST_URL is required (e.g. https://hrms.example.com/api/v1/attendance/device-logs/ingest)");
   process.exit(1);
 }
 if (!DEVICE_AGENT_TOKEN) {
-  console.error("DEVICE_AGENT_TOKEN is required — must match the backend's DEVICE_AGENT_TOKEN env var");
+  logger.error("DEVICE_AGENT_TOKEN is required — must match the backend's DEVICE_AGENT_TOKEN env var");
   process.exit(1);
 }
+
+// Derive the plain API base (VPS_INGEST_URL already points at the specific
+// ingest route) so the user-sync endpoints under the same /attendance
+// prefix can be built without a second config variable.
+const VPS_BASE_URL = VPS_INGEST_URL.replace(/\/attendance\/device-logs\/ingest\/?$/, "/attendance");
 
 async function fetchLogsFromDevice() {
   const zk = new ZKLib(ESSL_DEVICE_IP, ESSL_DEVICE_PORT, 10000, 4000);
@@ -38,9 +47,9 @@ async function fetchLogsFromDevice() {
 
 function toIngestPayload(rawLogs) {
   return rawLogs.map((log) => ({
-    employeeId: log.deviceUserId.toString(),
+    employeeId: log.user_id,
     deviceId: ESSL_DEVICE_IP,
-    punchTimestamp: log.recordTime,
+    punchTimestamp: log.record_time,
     punchType: "Check-In",
     source: "eSSL",
     rawDeviceData: log,
@@ -65,25 +74,25 @@ async function pushLogs(logs) {
   return res.json();
 }
 
-async function runOnce() {
+async function syncPunchLogs() {
   const state = loadState();
   const lastSyncedTimestamp = state.lastSyncedTimestamp ? new Date(state.lastSyncedTimestamp) : null;
 
-  console.log(`[${new Date().toISOString()}] Polling ${ESSL_DEVICE_IP}:${ESSL_DEVICE_PORT}...`);
+  logger.info(`Polling ${ESSL_DEVICE_IP}:${ESSL_DEVICE_PORT} for punch logs...`);
   const rawLogs = await fetchLogsFromDevice();
 
   const newLogs = lastSyncedTimestamp
-    ? rawLogs.filter((log) => new Date(log.recordTime) > lastSyncedTimestamp)
+    ? rawLogs.filter((log) => new Date(log.record_time) > lastSyncedTimestamp)
     : rawLogs;
 
   if (newLogs.length === 0) {
-    console.log("No new punches since last sync.");
+    logger.info("No new punches since last sync.");
     return;
   }
 
   const payload = toIngestPayload(newLogs);
   const result = await pushLogs(payload);
-  console.log(
+  logger.info(
     `Pushed ${payload.length} punch(es) — inserted: ${result?.data?.insertedCount ?? "?"}, unmatched: ${result?.data?.unmatchedCount ?? "?"}`
   );
 
@@ -91,14 +100,53 @@ async function runOnce() {
   // failed push retries the same window next poll instead of silently
   // dropping punches.
   const maxTimestamp = newLogs.reduce(
-    (max, log) => (new Date(log.recordTime) > max ? new Date(log.recordTime) : max),
+    (max, log) => (new Date(log.record_time) > max ? new Date(log.record_time) : max),
     lastSyncedTimestamp || new Date(0)
   );
-  saveState({ lastSyncedTimestamp: maxTimestamp.toISOString() });
+  saveState({ ...state, lastSyncedTimestamp: maxTimestamp.toISOString() });
+}
+
+async function syncDeviceUsers() {
+  const result = await runUserSyncCycle({
+    ZKLib,
+    esslIp: ESSL_DEVICE_IP,
+    esslPort: ESSL_DEVICE_PORT,
+    vpsBaseUrl: VPS_BASE_URL,
+    deviceAgentToken: DEVICE_AGENT_TOKEN,
+  });
+  if (result.processed > 0) {
+    logger.info(`Device user sync: ${result.succeeded ?? 0} succeeded, ${result.failed ?? 0} failed.`);
+  }
+}
+
+let consecutiveFailures = 0;
+
+async function runOnce() {
+  try {
+    await syncPunchLogs();
+    await syncDeviceUsers();
+    if (consecutiveFailures > 0) {
+      logger.info(`Device reachable again after ${consecutiveFailures} failed poll(s).`);
+    }
+    consecutiveFailures = 0;
+  } catch (err) {
+    consecutiveFailures++;
+    logger.error(`Poll failed (${consecutiveFailures} consecutive): ${err.message}`);
+    if (consecutiveFailures === CONSECUTIVE_FAILURE_WARNING_THRESHOLD) {
+      const downForMinutes = consecutiveFailures * POLL_INTERVAL_MINUTES;
+      logger.warn(
+        `Device or network has failed ${consecutiveFailures} polls in a row (~${downForMinutes} min). ` +
+          `Punches since the last successful sync are NOT lost — the device itself is still recording them, ` +
+          `and this agent's watermark only advances on a confirmed successful push, so the next successful ` +
+          `poll will catch everything up. This warning just flags that it's worth checking the device/network ` +
+          `if it doesn't self-recover soon.`
+      );
+    }
+  }
 }
 
 async function main() {
-  console.log(
+  logger.info(
     `Biometric agent starting. Device: ${ESSL_DEVICE_IP}:${ESSL_DEVICE_PORT}, poll interval: ${POLL_INTERVAL_MINUTES}min, target: ${VPS_INGEST_URL}`
   );
 
@@ -112,8 +160,6 @@ async function main() {
     running = true;
     try {
       await runOnce();
-    } catch (err) {
-      console.error(`Poll failed: ${err.message}`);
     } finally {
       running = false;
     }

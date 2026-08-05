@@ -1,0 +1,13 @@
+node_modules/
+
+# Local runtime state — the sync watermark and log file are per-machine,
+# never something to version control.
+state.json
+logs/
+*.log
+
+.env
+.env.*
+!.env.example
+
+.DS_Store
