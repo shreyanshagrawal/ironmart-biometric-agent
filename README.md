@@ -3,8 +3,8 @@
 Standalone agent that runs on the office LAN (same network as the ESSL K30
 biometric device) and bridges it to the IronMart HRMS backend over HTTPS:
 
-1. **Punch sync** — polls the device for attendance logs and pushes new
-   punches to the HRMS backend.
+1. **Punch sync** — the device pushes attendance logs to this agent over HTTP
+   (ADMS push protocol); the agent forwards new punches to the HRMS backend.
 2. **Device user enrollment sync** — pulls a queue of "enroll / update /
    remove this employee" jobs from the HRMS backend and applies them to the
    device directly, so an HR admin never has to touch the device by hand
@@ -29,6 +29,7 @@ carrying the entire HRMS codebase along with it.
 - [Quick start (running directly with Node)](#quick-start-running-directly-with-node)
 - [Running with Docker](#running-with-docker)
 - [Environment variables](#environment-variables)
+- [Device configuration (one-time)](#device-configuration-one-time)
 - [Device user enrollment sync](#device-user-enrollment-sync)
 - [Linux / Raspberry Pi setup (start on boot + auto-update)](#linux--raspberry-pi-setup-start-on-boot--auto-update)
 - [Windows setup (start on boot + auto-update)](#windows-setup-start-on-boot--auto-update)
@@ -41,21 +42,35 @@ carrying the entire HRMS codebase along with it.
 
 ## How it works
 
-Every `POLL_INTERVAL_MINUTES` (default 5), the agent runs one cycle that does
-two independent things against the device, back to back:
+### Punch sync (ADMS push — device calls us)
 
-**1. Punch sync**
-- Connects to the device via [`zkteco-js`](https://www.npmjs.com/package/zkteco-js) and fetches its attendance log (`getAttendances()`).
-- Filters out anything already pushed, tracked via a local `state.json` watermark (`lastSyncedTimestamp`) — a restart never re-pushes old punches.
-- POSTs new punches to `VPS_INGEST_URL` (`POST /api/v1/attendance/device-logs/ingest`) with a bearer token.
-- Only advances the watermark after a **confirmed successful push** — a failed push retries the same window on the next poll. The backend also dedupes by `(deviceId, punchTimestamp)`, so an occasional re-push after a crash mid-request is harmless, never a duplicate attendance record.
+The ESSL K30 uses the **ADMS push protocol** for punch sync. The device
+initiates the connection to this agent's HTTP server — not the other way
+around. This is the same protocol eSSL Lite uses, which is why it works
+where a ZK TCP pull would time out.
 
-**2. Device user enrollment sync**
+Flow every time the device has a new punch (or reconnects):
+1. Device sends `GET /iclock/cdata` — agent responds with `ATTLOGStamp`
+   (the Unix timestamp of the last record we already have). The device
+   will only push records **newer** than that stamp, so we never receive
+   the full accumulated log again after the first sync.
+2. Device sends `POST /iclock/cdata?table=ATTLOG` with tab-delimited
+   punch lines. Agent parses them, filters any already-synced records
+   (belt-and-suspenders on top of the ATTLOGStamp), POSTs new ones to
+   `VPS_INGEST_URL`, and advances the watermark only after a confirmed
+   successful push.
+3. Agent responds `OK: <count>` — device marks those records as delivered.
+
+### Device user enrollment sync (ZK TCP write — agent calls device)
+
 - Fetches any `Pending` jobs from `GET {backend}/attendance/device-users/pending`.
-- For each job, connects to the device and applies it (enroll/update via `setUser`, remove via `deleteUser`).
-- Acks each job back to the backend (`Synced` or `Failed` with a real error message) so the HRMS UI's "Device User Sync" panel (Attendance → Device Sync) always reflects the true state, not a guess.
+- For each job, connects to the device over ZK TCP and applies it
+  (`setUser` for Create/Update, `deleteUser` for Disable).
+- Acks each job back to the backend (`Synced` or `Failed` with a real
+  error message) so the HRMS UI's "Device User Sync" panel reflects the
+  true state, not a guess.
 
-See [Device user enrollment sync](#device-user-enrollment-sync) below for the full detail, and [What happens when the device is unreachable](#what-happens-when-the-device-is-unreachable--not-synced) for exactly how failures are handled — nothing here is silent.
+See [Device user enrollment sync](#device-user-enrollment-sync) for full detail.
 
 ---
 
@@ -71,11 +86,21 @@ npm start
 # equivalent to: node --env-file=.env src/index.js
 ```
 
-`src/index.js` reads config purely from `process.env` — it does **not** load `.env` on its own (no `dotenv`, no implicit loading). `--env-file=.env` (Node 20.6+) is what actually gets those variables into the process; running plain `node src/index.js` will fail immediately with `VPS_INGEST_URL is required` / `DEVICE_AGENT_TOKEN is required` even with a correctly-filled-in `.env` sitting right next to it — `npm start` already has the flag baked in via `package.json`, so prefer it over calling `node` directly unless you have a reason not to.
+`src/index.js` reads config purely from `process.env` — it does **not** load
+`.env` on its own (no `dotenv`, no implicit loading). `--env-file=.env`
+(Node 20.6+) is what actually gets those variables into the process; running
+plain `node src/index.js` will fail immediately with `VPS_INGEST_URL is
+required` / `DEVICE_AGENT_TOKEN is required` even with a correctly-filled-in
+`.env` sitting right next to it — `npm start` already has the flag baked in
+via `package.json`, so prefer it over calling `node` directly unless you have
+a reason not to.
 
-This runs in the foreground — fine for testing, but you'll want it running
-as a real service that survives a reboot. See the platform-specific setup
-sections below.
+This runs in the foreground — fine for testing, but you'll want it running as
+a real service that survives a reboot. See the platform-specific setup sections
+below.
+
+After starting the agent, complete the **one-time device configuration** below
+so the device knows where to push punches.
 
 ## Running with Docker
 
@@ -86,14 +111,23 @@ docker run -d --name ironmart-biometric-agent \
   --restart unless-stopped \
   --env-file .env \
   -v "$(pwd)/data:/app/data" \
+  -p 7788:7788 \
   ironmart-biometric-agent
 ```
 
 The `-v ./data:/app/data` mount is what makes `state.json` survive a
 container restart — without it, a restart just re-syncs the device's
-current full punch log once (harmless, but noisier than necessary).
+current punch log once (harmless, but noisier than necessary).
 
-**Note:** the git-based auto-update mechanism described below (`scripts/update.sh`/`.ps1`) is built for a direct Node.js install (it does a `git pull` inside the running checkout) and is **not** wired up for the Docker path — a container image needs a registry + something like [Watchtower](https://containrrr.dev/watchtower/) to auto-update, which wasn't part of what this pass built. If you want auto-updating Docker deployment, that's a real, separate follow-up — flagging it here rather than pretending Docker gets it for free.
+The `-p 7788:7788` (or whatever `ADMS_PORT` is) exposes the ADMS server
+so the device can reach it.
+
+**Note:** the git-based auto-update mechanism described below
+(`scripts/update.sh`/`.ps1`) is built for a direct Node.js install (it
+does a `git pull` inside the running checkout) and is **not** wired up for
+the Docker path — a container image needs a registry + something like
+[Watchtower](https://containrrr.dev/watchtower/) to auto-update. If you
+want auto-updating Docker deployment, that's a real, separate follow-up.
 
 ---
 
@@ -101,34 +135,95 @@ current full punch log once (harmless, but noisier than necessary).
 
 | Variable | Required | Description |
 |---|---|---|
-| `ESSL_DEVICE_IP` | No (default `192.168.1.201`) | The device's LAN IP |
-| `ESSL_DEVICE_PORT` | No (default `4370`) | The device's port |
-| `ESSL_DEVICE_TIMEOUT_MS` | No (default `60000`) | How long to wait for the device to respond before timing out a request — raise this if you see `TIMEOUT_IN_RECEIVING_RESPONSE_AFTER_REQUESTING_DATA` in the logs |
+| `ESSL_DEVICE_IP` | No (default `192.168.1.201`) | The device's LAN IP — used only for ZK TCP user enrollment writes |
+| `ESSL_DEVICE_PORT` | No (default `4370`) | The device's ZK TCP port — used only for user enrollment writes |
+| `ESSL_DEVICE_TIMEOUT_MS` | No (default `60000`) | ZK TCP command timeout — only affects `setUser`/`deleteUser`, not punch sync |
+| `ADMS_PORT` | No (default `7788`) | Port this agent's ADMS HTTP server listens on — must match the device's Cloud Server port setting |
 | `VPS_INGEST_URL` | **Yes** | Full URL to the backend's punch-log ingest endpoint, e.g. `https://hrms.example.com/api/v1/attendance/device-logs/ingest` |
 | `DEVICE_AGENT_TOKEN` | **Yes** | Shared secret — must match the backend's `DEVICE_AGENT_TOKEN` env var exactly |
-| `POLL_INTERVAL_MINUTES` | No (default `5`) | How often to run a full sync cycle |
+| `POLL_INTERVAL_MINUTES` | No (default `5`) | How often to check for pending device-user enrollment jobs — punch sync is event-driven and ignores this |
 | `LOG_DIR` | No (default `./logs`) | Where `agent.log` is written |
 | `STATE_FILE_PATH` | No (default `./state.json`) | Where the punch-sync watermark is persisted |
 
-The device-user-sync endpoints are derived automatically from `VPS_INGEST_URL` (stripping the trailing `/attendance/device-logs/ingest`) — no separate URL to configure.
+The device-user-sync endpoints are derived automatically from `VPS_INGEST_URL`
+(stripping the trailing `/attendance/device-logs/ingest`) — no separate URL
+to configure.
+
+---
+
+## Device configuration (one-time)
+
+This is a **one-time manual step** on the physical device. After this, punches
+flow automatically without any further device-side changes.
+
+On the K30, go to:
+**Menu → Comm. → Cloud Server Settings**
+
+Set the following:
+
+| Field | Value |
+|---|---|
+| Server Mode | `ADMS` |
+| Enable Domain Name | `OFF` |
+| Server Address | `<LAN IP of the agent machine>` e.g. `192.168.1.50` |
+| Server Port | `7788` (or whatever `ADMS_PORT` is set to) |
+| Enable Proxy Server | `OFF` |
+
+Save and exit. The device will connect to the agent immediately and push
+any queued punches. You should see `ADMS handshake SN=...` in the agent log
+within a few seconds.
+
+**Firewall note (Windows):** the agent machine's Windows Firewall must allow
+inbound TCP on the ADMS port. From an elevated PowerShell prompt:
+
+```powershell
+New-NetFirewallRule -DisplayName "IronMart Biometric ADMS" `
+  -Direction Inbound -Protocol TCP -LocalPort 7788 -Action Allow
+```
 
 ---
 
 ## Device user enrollment sync
 
-**Why this exists**: before this, enrolling a new employee on the physical device meant someone walking up to it and typing their details in on its own keypad/screen — a real, easy-to-forget manual step disconnected from the actual HR system of record. Now, setting (or changing, or clearing) an employee's **Biometric Device Code** field in the HRMS app is enough — the agent picks up the change and applies it to the device automatically, next time it polls.
+**Why this exists**: before this, enrolling a new employee on the physical
+device meant someone walking up to it and typing their details in on its own
+keypad/screen — a real, easy-to-forget manual step disconnected from the
+actual HR system of record. Now, setting (or changing, or clearing) an
+employee's **Biometric Device Code** field in the HRMS app is enough — the
+agent picks up the change and applies it to the device automatically, next
+time it polls.
 
 **Flow**:
-1. In HRMS, HR sets/changes/clears an employee's `biometricDeviceCode` (Employee create/edit, or the "Sync to Device" action on Attendance → Device Sync). The backend enqueues a `device_user_sync_jobs` row (`Create`/`Update`/`Disable`, status `Pending`).
-2. On its next poll, this agent fetches all `Pending` jobs (`GET /attendance/device-users/pending`).
+1. In HRMS, HR sets/changes/clears an employee's `biometricDeviceCode`
+   (Employee create/edit, or the "Sync to Device" action on Attendance →
+   Device Sync). The backend enqueues a `device_user_sync_jobs` row
+   (`Create`/`Update`/`Disable`, status `Pending`).
+2. On its next poll, this agent fetches all `Pending` jobs
+   (`GET /attendance/device-users/pending`).
 3. For each job:
-   - **Create/Update**: connects to the device, calls `getUsers()` to check whether that `biometricDeviceCode` is already enrolled at some internal device slot (`uid`) — if so, reuses that slot (an update); if not, allocates the lowest free slot in the device's valid `1–3000` range (a new enrollment). Calls `setUser(uid, userid, name, ...)`.
-   - **Disable**: calls `deleteUser(uid)` for that employee's slot, if one exists. If the employee was never actually enrolled on the device, this is an honest no-op — nothing to remove.
-4. Acks the job back to the backend as `Synced`, or `Failed` with the real error message if anything went wrong (device unreachable, an out-of-range uid, etc.) — visible on the HRMS "Device User Sync" panel, not silently swallowed.
+   - **Create/Update**: connects to the device, calls `getUsers()` to check
+     whether that `biometricDeviceCode` is already enrolled at some internal
+     device slot (`uid`) — if so, reuses that slot (an update); if not,
+     allocates the lowest free slot in the device's valid `1–3000` range (a
+     new enrollment). Calls `setUser(uid, userid, name, ...)`.
+   - **Disable**: calls `deleteUser(uid)` for that employee's slot, if one
+     exists. If the employee was never actually enrolled on the device, this
+     is an honest no-op — nothing to remove.
+4. Acks the job back to the backend as `Synced`, or `Failed` with the real
+   error message if anything went wrong — visible on the HRMS "Device User
+   Sync" panel, not silently swallowed.
 
-**Why a queue, not a direct call**: the backend (on the VPS) has no network route to the device's office-LAN address, so it can never call the device directly — only this agent, which is actually on that LAN, can. The queue is what lets HR's action in the app ("save this employee") and the agent's next poll (whenever that is) stay decoupled and eventually consistent, instead of the HR save itself blocking on network reachability to a device it can't even see.
+**Why a queue, not a direct call**: the backend (on the VPS) has no network
+route to the device's office-LAN address, so it can never call the device
+directly — only this agent, which is actually on that LAN, can. The queue is
+what lets HR's action in the app and the agent's next poll stay decoupled and
+eventually consistent.
 
-**Caveat, stated plainly**: the underlying `zkteco-js` library's `setUser`/`deleteUser` implementation has been code-reviewed (its wire format matches the ZKTeco protocol documentation and the shape the older, read-only `node-zklib` library already used successfully for `getAttendances()`), and the pure job-processing logic around it (uid allocation/reuse, ack handling, failure handling) has been verified with a fully mocked test device — but **it has not yet been exercised against a real, physical K30**. The first real enrollment/removal on live hardware is worth watching closely (check the HRMS Device User Sync panel and this agent's logs) rather than assumed correct on faith.
+**Caveat**: the `setUser`/`deleteUser` implementation has been code-reviewed
+and verified with a fully mocked test device — but **not yet against a real,
+physical K30**. The first real enrollment/removal on live hardware is worth
+watching closely (check the HRMS Device User Sync panel and this agent's logs)
+rather than assumed correct on faith.
 
 ---
 
@@ -162,23 +257,28 @@ sudo cp deploy/systemd/ironmart-biometric-agent-updater.timer /etc/systemd/syste
 sudo cp deploy/systemd/ironmart-agent-sudoers /etc/sudoers.d/ironmart-agent
 sudo chmod 440 /etc/sudoers.d/ironmart-agent
 
-# 5. Enable + start everything
+# 5. Open the ADMS port in the firewall (if ufw is active)
+sudo ufw allow 7788/tcp
+
+# 6. Enable + start everything
 sudo systemctl daemon-reload
 sudo systemctl enable --now ironmart-biometric-agent.service
 sudo systemctl enable --now ironmart-biometric-agent-updater.timer
 
-# 6. Verify
+# 7. Verify
 sudo systemctl status ironmart-biometric-agent.service
 sudo journalctl -u ironmart-biometric-agent -f       # live logs
 sudo systemctl list-timers ironmart-biometric-agent-updater.timer
 ```
 
 That's it — the agent now:
-- **Starts automatically on boot** (`WantedBy=multi-user.target`, no login required — works headless, e.g. on a Pi with no monitor attached).
-- **Restarts automatically if it crashes** (`Restart=on-failure`, capped at 5 restarts per 5 minutes so a genuinely broken config doesn't spin forever).
-- **Auto-updates**: the updater timer fires 2 minutes after boot and then every 15 minutes, runs `scripts/update.sh` (see [How auto-update works](#how-auto-update-works)), and restarts the main service only if a new commit was actually pulled.
+- **Starts automatically on boot** (`WantedBy=multi-user.target`, no login required).
+- **Restarts automatically if it crashes** (`Restart=on-failure`, capped at 5 restarts per 5 minutes).
+- **Auto-updates**: the updater timer fires 2 minutes after boot and then every 15 minutes, runs `scripts/update.sh`, and restarts the main service only if a new commit was actually pulled.
 
-**If your device IP or one of the other env vars changes later**: edit `/opt/ironmart-biometric-agent/.env` directly, then `sudo systemctl restart ironmart-biometric-agent.service` — no reinstall needed.
+**If your device IP or one of the other env vars changes later**: edit
+`/opt/ironmart-biometric-agent/.env` directly, then
+`sudo systemctl restart ironmart-biometric-agent.service` — no reinstall needed.
 
 ---
 
@@ -199,6 +299,10 @@ npm install
 
 # From an elevated ("Run as Administrator") PowerShell prompt:
 powershell -ExecutionPolicy Bypass -File deploy\windows\install-tasks.ps1
+
+# Open the ADMS port in Windows Firewall (replace 7788 if ADMS_PORT differs)
+New-NetFirewallRule -DisplayName "IronMart Biometric ADMS" `
+  -Direction Inbound -Protocol TCP -LocalPort 7788 -Action Allow
 ```
 
 This registers **both** the agent and its updater as Scheduled Tasks that
@@ -219,6 +323,10 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\install-nssm-service.ps1
 
 # Still need the updater task separately — it works with either setup:
 powershell -ExecutionPolicy Bypass -File deploy\windows\install-updater-task.ps1
+
+# Open the ADMS port
+New-NetFirewallRule -DisplayName "IronMart Biometric ADMS" `
+  -Direction Inbound -Protocol TCP -LocalPort 7788 -Action Allow
 ```
 
 ### Verifying either option
@@ -250,60 +358,99 @@ use **different mechanisms** because they have different network positions:
   (Windows) run **on a timer** (every 15 minutes, via the systemd timer or
   Scheduled Task set up above): `git fetch`, compare the local commit
   against `origin/main`, and if they differ:
-  1. Refuse to proceed if the local working tree has uncommitted changes (never silently discard someone's manual edit on the box).
+  1. Refuse to proceed if the local working tree has uncommitted changes.
   2. `git pull --ff-only`.
-  3. `npm install`, but **only** if `package.json`/`package-lock.json` actually changed in the new commit(s) — otherwise skipped, so most update checks are fast and don't depend on npm's registry being reachable.
-  4. Restart the agent (via `systemctl restart` on Linux, or `Restart-Service`/`Stop+Start-ScheduledTask` on Windows, whichever the box is actually running).
+  3. `npm install`, but **only** if `package.json`/`package-lock.json` actually changed.
+  4. Restart the agent.
 
 This means a push to this repo's `main` branch takes up to 15 minutes to
 reach a given office machine — a deliberate, honest tradeoff for a device
-with no inbound reachability, not a bug. If you need it faster, lower
-`OnUnitActiveSec`/`RepetitionInterval` in the timer/task — there's no
-technical floor, just more frequent `git fetch` calls.
+with no inbound reachability, not a bug.
 
 ---
 
 ## What happens when the device is unreachable / not synced
 
-This section exists because "what happens when the biometric device is
-offline" is exactly the kind of question that's easy to leave undocumented
-and then discover the hard way during an actual outage. Here's precisely
-what happens, for both halves of what this agent does:
-
 ### Punch sync
 
-- A failed poll (device off, network down, wrong IP, etc.) throws inside `syncPunchLogs()`. The watermark (`state.json`'s `lastSyncedTimestamp`) is **only ever advanced after a confirmed successful push** — so a failed poll changes nothing on disk, and the *next* successful poll automatically picks up everything since the last real success. **No punches are ever lost from a temporary outage** — the device itself keeps recording them internally regardless of whether this agent can reach it right now; this agent is just a periodic courier, not the system of record.
-- `consecutiveFailures` increments on every failed poll (regardless of which half — punch sync or user sync — failed) and resets to 0 on the next fully successful one.
-- After **3 consecutive failed polls**, a single escalated `WARN`-level log line fires (not on every failure — that would just be noise): it explicitly states punches are *not* lost and explains why, then flags that it's worth physically checking the device/network if it doesn't self-recover. It does **not** re-fire on every subsequent failure — only once per outage, when it crosses that threshold; a fresh success resets the counter so a *later* outage gets its own warning.
-- A successful poll after 1+ failures logs a plain "Device reachable again after N failed poll(s)" info line, so the log has a clear recovery marker too, not just the failure side.
+Since punch sync is now push-based (the device calls us, not the other way
+around), "device unreachable" means **the device simply won't push** — it
+queues punches internally and pushes them when connectivity is restored.
+This agent's ADMS server is always listening; it doesn't need to know the
+device is offline in advance.
+
+When the device reconnects and pushes:
+- The `ATTLOGStamp` from the handshake tells it where we left off, so it
+  sends only the records accumulated during the outage.
+- Our watermark only advances after a confirmed successful backend push, so
+  even if the device pushes and we fail to forward to the backend, no punches
+  are lost — the next ADMS push will include them again.
+
+**No punches are ever lost from a device or network outage** — the device
+itself is the source of record for punch data; this agent is a courier, not
+a store.
 
 ### Device user enrollment sync
 
-- If the agent can't even **connect** to the device this cycle, every job that was fetched as `Pending` for that cycle is acked back to the backend as `Failed` with a clear reason (e.g. `"Device connection failed: ..."`) — visible immediately on the HRMS "Device User Sync" panel, not left silently stuck in `Pending` with no explanation.
-- Because the backend only ever marks a job `Synced` on a real, confirmed ack, a `Failed` job is **not** lost — HR can just click "Sync to Device" again from the HRMS UI once the device is back, which re-enqueues a fresh `Pending` job the agent will pick up on its next successful cycle. (There's currently no automatic retry-forever on a `Failed` job — a deliberate choice, since an indefinitely-retrying job for, say, a bad/duplicate device code would otherwise fail silently forever with no human ever told to fix the underlying data.)
-- If the device connects fine but one *specific* job fails (e.g. an invalid uid, a malformed employee code), only that job is acked `Failed` with its own real error — the rest of the batch still proceeds normally.
+- If the agent can't connect to the device this cycle, every job that was
+  fetched as `Pending` for that cycle is acked back to the backend as
+  `Failed` with a clear reason — visible immediately on the HRMS "Device
+  User Sync" panel, not left silently stuck in `Pending`.
+- A `Failed` job is not lost — HR can click "Sync to Device" again from the
+  HRMS UI once the device is back, which re-enqueues a fresh `Pending` job.
+- If one specific job fails (e.g. an invalid uid), only that job is acked
+  `Failed` — the rest of the batch still proceeds.
 
 ### In short
 
-Nothing about a device outage or a desync is silent: every failure either shows up as a clearly-labeled `Failed` job in the HRMS UI, or as an escalated warning in this agent's own log after 3 consecutive misses — and nothing is ever lost, only delayed, since both the device's own internal punch log and the backend's job queue are the real sources of truth, not this agent's in-memory state.
+Nothing about a device outage or a desync is silent: every failure either
+shows up as a clearly-labelled `Failed` job in the HRMS UI, or in this
+agent's own log — and nothing is ever lost, only delayed.
 
 ---
 
 ## Logs & troubleshooting
 
-- **Log file**: `logs/agent.log` inside the repo (or `$LOG_DIR` if overridden) — every poll's punch-sync and device-user-sync summary, plus every failure with its real error message.
-- **Linux**: `sudo journalctl -u ironmart-biometric-agent -f` for live output (the same lines, also mirrored to the systemd journal); `sudo journalctl -u ironmart-biometric-agent-updater` to see the update-check history.
-- **Windows**: `Get-Content logs\agent.log -Tail 50 -Wait`; for the NSSM path, also `logs\service-stdout.log`/`service-stderr.log`.
-- **In the HRMS app**: Attendance → Device Sync shows both the punch-sync history (Sync Execution Log) and the device-user-sync job queue (Device User Sync), including any `Failed` job's real error message — check there first before diving into raw log files.
-- **"Nothing is syncing at all"**: check `DEVICE_AGENT_TOKEN` matches the backend's exactly (a mismatch 401s every request, which shows as a connection-shaped failure in this agent's logs even though the device itself is fine) — this is the most common misconfiguration.
+- **Log file**: `logs/agent.log` inside the repo (or `$LOG_DIR` if overridden).
+- **Linux**: `sudo journalctl -u ironmart-biometric-agent -f` for live output.
+- **Windows**: `Get-Content logs\agent.log -Tail 50 -Wait`; for the NSSM
+  path, also `logs\service-stdout.log`/`service-stderr.log`.
+- **In the HRMS app**: Attendance → Device Sync shows both the punch-sync
+  history and the device-user-sync job queue, including any `Failed` job's
+  real error message — check there first before diving into raw log files.
+- **"Nothing is syncing at all"**:
+  1. Check that `DEVICE_AGENT_TOKEN` matches the backend's exactly (a
+     mismatch 401s every request).
+  2. Check that the device's Cloud Server Settings point to this machine's
+     LAN IP and the correct ADMS port (see [Device configuration](#device-configuration-one-time)).
+  3. Check that the Windows Firewall (or ufw on Linux) allows inbound TCP
+     on the ADMS port.
+  4. Look for `ADMS handshake SN=...` in the log — if it's there, the device
+     is connected and pushing correctly.
 
 ---
 
 ## Known limitations
 
-- The device-user-sync feature (enroll/update/remove on the physical device) has been verified via code review and a fully mocked test, but **not yet against real ESSL K30 hardware** — see the caveat in [Device user enrollment sync](#device-user-enrollment-sync).
-- Punch sync (`getAttendances()`) has been running in production against real hardware since before this repo was split out — only the newer enrollment-sync half carries the caveat above.
-- Docker deployment has no wired auto-update mechanism (see the note under [Running with Docker](#running-with-docker)).
-- Auto-update polls on a fixed interval (default 15 min), not instantly on push — an accepted tradeoff for a device with no inbound network reachability, not a bug.
-- **Confirmed real bug in the upstream `zkteco-js` library** (found against real hardware, not theoretical): `readWithBuffer` in its `src/ztcp.js` calls `reject(err)` on a device timeout but is missing a `return` statement afterward, so it falls through into `decodeTCPHeader(reply.subarray(...))` with `reply` still `null`. That throw happens inside an unawaited async Promise executor, which Node treats as an unhandled rejection and — by default — kills the whole process over, regardless of the fact that this agent's own code already correctly receives and handles the *real* rejection via the normal `try/catch` in `runOnce()`. **Mitigated here**: `src/index.js` installs `process.on("unhandledRejection", ...)`/`process.on("uncaughtException", ...)` handlers specifically so this one well-understood, externally-caused failure mode can't take the whole agent down — it's logged and the agent keeps polling normally, exactly as if it had been a clean rejection. If you see `TIMEOUT_IN_RECEIVING_RESPONSE_AFTER_REQUESTING_DATA` in the logs immediately followed by "Unhandled promise rejection... agent continues running," that's this — the underlying timeout itself is usually a device/network issue (see `ESSL_DEVICE_TIMEOUT_MS` below), not something this agent did wrong.
-- `ESSL_DEVICE_TIMEOUT_MS` (default `60000`, raised from `20000` which itself replaced the original hardcoded `10000` — real-hardware testing showed shorter values cause frequent `TIMEOUT_IN_RECEIVING_RESPONSE_AFTER_REQUESTING_DATA` errors with large attendance logs) — raise it further if timeouts persist on a slow LAN link.
+- The device-user-sync feature (enroll/update/remove on the physical device)
+  has been verified via code review and a fully mocked test, but **not yet
+  against real ESSL K30 hardware** — see the caveat in
+  [Device user enrollment sync](#device-user-enrollment-sync).
+- Punch sync (`ADMS push`) has been designed against the documented eSSL ADMS
+  protocol and validated against the device photos confirming `Server Mode =
+  ADMS`. The first real end-to-end push from live hardware is worth watching
+  in the logs to confirm the ATTLOGStamp handshake and ATTLOG parsing work as
+  expected.
+- Docker deployment has no wired auto-update mechanism (see the note under
+  [Running with Docker](#running-with-docker)).
+- Auto-update polls on a fixed interval (default 15 min), not instantly on
+  push — an accepted tradeoff for a device with no inbound network
+  reachability, not a bug.
+- **Confirmed real bug in the upstream `zkteco-js` library**: `readWithBuffer`
+  in its `src/ztcp.js` calls `reject(err)` on a device timeout but is missing
+  a `return` afterward, causing a secondary unhandled rejection from a
+  `null.subarray(...)` call. **Mitigated**: `src/index.js` installs
+  `process.on("unhandledRejection", ...)` handlers so this orphaned rejection
+  can't kill the process. This bug only affects the ZK TCP write direction
+  (user enrollment) — punch sync no longer uses ZK TCP at all, so it is
+  completely unaffected by this issue.
