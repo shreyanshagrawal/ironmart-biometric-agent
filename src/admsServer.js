@@ -99,8 +99,20 @@ export function startAdmsServer({ port, onPunchBatch, getLastSyncedUnixSec }) {
     // Some eSSL firmware variants append .aspx to every path
     // (e.g. /iclock/cdata.aspx). Strip it so one set of handlers covers both.
     const pathname = url.pathname.replace(/\.aspx$/i, "");
-    const sn    = url.searchParams.get("SN")    ?? "unknown";
-    const table = url.searchParams.get("table") ?? "";
+    // Case-insensitive param lookup: URLSearchParams.get() is exact-case on
+    // the param NAME (not just the value), and different eSSL firmware
+    // variants have already shown they don't consistently match the "usual"
+    // casing (see the .aspx path quirk above) — a device sending `Table=`
+    // instead of `table=` would otherwise silently fall through every route
+    // match below with zero indication why.
+    const getParamCI = (name) => {
+      for (const [key, value] of url.searchParams) {
+        if (key.toLowerCase() === name.toLowerCase()) return value;
+      }
+      return null;
+    };
+    const sn    = getParamCI("SN")    ?? "unknown";
+    const table = getParamCI("table") ?? "";
 
     // ── Device heartbeat / handshake ──────────────────────────────────────
     if (req.method === "GET" && pathname === "/iclock/cdata") {
@@ -162,7 +174,18 @@ export function startAdmsServer({ port, onPunchBatch, getLastSyncedUnixSec }) {
     }
 
     // ── Unknown endpoint ──────────────────────────────────────────────────
-    logger.warn(`ADMS: unrecognised ${req.method} ${pathname} from SN=${sn}`);
+    // Log the FULL raw request (path with its original query string, before
+    // any parsing/assumptions) — the previous version only logged the
+    // already-parsed pathname, which stayed identical whether the .aspx
+    // stripping fix worked or not, and gave no visibility into *why* a
+    // request that looked like a real ATTLOG push (POST /iclock/cdata)
+    // still fell through here (most likely cause: this firmware sends the
+    // table param under different casing, e.g. `Table=ATTLOG` — query
+    // param NAMES are case-sensitive in URLSearchParams.get()).
+    logger.warn(
+      `ADMS: unrecognised ${req.method} ${rawUrl} from SN=${sn} — ` +
+      `parsedPathname=${pathname} allParams=${JSON.stringify(Object.fromEntries(url.searchParams))}`
+    );
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("Not found");
   });
