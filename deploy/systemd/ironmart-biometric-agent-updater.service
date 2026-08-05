@@ -1,0 +1,18 @@
+[Unit]
+Description=IronMart Biometric Agent - check for updates and restart if found
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ironmart
+WorkingDirectory=/opt/ironmart-biometric-agent
+ExecStart=/opt/ironmart-biometric-agent/scripts/update.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ironmart-biometric-agent-updater
+
+# The updater restarts the main service via `systemctl restart`, which
+# needs privilege the "ironmart" user doesn't have by default — grant it
+# narrowly via a sudoers drop-in rather than running the whole updater as
+# root. See README.md's systemd setup section for the exact sudoers line.

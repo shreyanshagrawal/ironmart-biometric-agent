@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the IronMart Biometric Agent updater every 15 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Unit=ironmart-biometric-agent-updater.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

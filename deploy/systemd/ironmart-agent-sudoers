@@ -1,0 +1,8 @@
+# Install with: sudo cp deploy/systemd/ironmart-agent-sudoers /etc/sudoers.d/ironmart-agent
+# then: sudo chmod 440 /etc/sudoers.d/ironmart-agent
+#
+# Grants the "ironmart" service user permission to restart (only restart —
+# nothing broader) the agent's own systemd unit with no password prompt, so
+# scripts/update.sh can run unattended from a timer. Does not grant any
+# other sudo privilege.
+ironmart ALL=(root) NOPASSWD: /usr/bin/systemctl restart ironmart-biometric-agent.service

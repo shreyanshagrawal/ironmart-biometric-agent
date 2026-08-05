@@ -1,0 +1,29 @@
+[Unit]
+Description=IronMart Biometric Agent (ESSL K30 punch sync + device user enrollment)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# EDIT these two before installing — see README.md "Linux / Raspberry Pi setup".
+User=ironmart
+WorkingDirectory=/opt/ironmart-biometric-agent
+
+# Loads .env directly — no extra process manager needed.
+EnvironmentFile=/opt/ironmart-biometric-agent/.env
+ExecStart=/usr/bin/node src/index.js
+
+# Auto-restart on crash, but not in a tight loop if it's crash-looping.
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# The agent's own logger already writes to logs/agent.log inside the repo;
+# also mirror stdout/stderr into the system journal for `journalctl -u`.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ironmart-biometric-agent
+
+[Install]
+WantedBy=multi-user.target
