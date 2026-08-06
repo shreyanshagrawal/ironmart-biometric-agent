@@ -27,10 +27,27 @@ import { recordDeviceContact } from "./heartbeat.js";
 
 /**
  * Parse the tab-delimited ATTLOG body the device pushes.
- * Each non-empty line:  PIN\tVerified\tDateTime\tStatus\tWorkCode\tReserved
- * e.g.  1001\t1\t2026-08-05 08:30:00\t0\t0\t0
  *
- * Returns an array of parsed record objects.
+ * Each non-empty line:  PIN\tDateTime\tStatus\tVerify\tWorkCode\tReserved
+ * e.g.  8\t2026-08-06 14:05:23\t255\t1\t0
+ *
+ * CONFIRMED against a real push from this device (previous version of this
+ * function had DateTime and Status swapped, i.e. assumed
+ * PIN\tVerified\tDateTime\tStatus\tWorkCode). Proof: the real device's
+ * second field parsed as a plausible verify-mode/status value while the
+ * THIRD field's leading digits, read as an integer, equalled the current
+ * year — that integer can only come from parsing a real datetime string
+ * ("2026-08-06...") that had landed in the wrong slot. The corrected order
+ * matches the standard, widely-documented ZKTeco/ESSL ADMS ATTLOG format.
+ * The bug corrupted every stored punchTimestamp (e.g. produced year 255
+ * instead of 2026) — real historical rows written before this fix need a
+ * one-time manual correction/removal on the backend, not something this
+ * agent can retroactively fix.
+ *
+ * Status is a known-unreliable field on budget ESSL/ZK firmware — some
+ * devices can't distinguish check-in from check-out and send a sentinel
+ * (0xFF = 255 is a common "unset byte" convention) instead of a real 0-5
+ * code. Only trust it when it's one of the documented small values.
  */
 function parseAttLog(body) {
   const records = [];
@@ -38,17 +55,18 @@ function parseAttLog(body) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     const parts = trimmed.split("\t");
-    // Need at least PIN + Verified + DateTime
-    if (parts.length < 3) continue;
-    const [pin, verified, dateTime, status, workCode] = parts;
+    // Need at least PIN + DateTime
+    if (parts.length < 2) continue;
+    const [pin, dateTime, status, verify, workCode] = parts;
     const dt = dateTime?.trim();
     if (!dt || !pin?.trim()) continue;
+    const statusCode = parseInt(status ?? "", 10);
     records.push({
-      pin:      pin.trim(),
-      verified: parseInt(verified ?? "0", 10),
-      dateTime: dt,                           // "YYYY-MM-DD HH:MM:SS" (device local time)
-      status:   parseInt(status ?? "0", 10),  // 0=in, 1=out, 4=overtime-in, etc.
-      workCode: workCode?.trim() ?? "0",
+      pin:       pin.trim(),
+      dateTime:  dt,                                   // "YYYY-MM-DD HH:MM:SS" (device local time)
+      status:    Number.isNaN(statusCode) ? null : statusCode, // 0=in,1=out,2=break-out,3=break-in,4=OT-in,5=OT-out — null if not a recognized code (e.g. this device's 255 sentinel)
+      verify:    parseInt(verify ?? "0", 10) || 0,      // verify mode: 0=password,1=fingerprint,2=card,15=face...
+      workCode:  workCode?.trim() ?? "0",
     });
   }
   return records;

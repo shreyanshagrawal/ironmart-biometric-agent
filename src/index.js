@@ -105,6 +105,25 @@ async function pushLogs(logs) {
 // device side), pushes new ones to the backend, and advances the watermark.
 // The watermark only moves after a confirmed successful backend push — same
 // guarantee as the old poll model, nothing is ever silently dropped.
+// HRMS's punch_type enum is Check-In | Check-Out | Break-Start | Break-End —
+// no generic "unknown". Only the 4 documented ZKTeco ADMS status codes with
+// a real match get mapped explicitly; anything else (including this
+// device's own confirmed 255 sentinel) falls back to Check-In, matching
+// this codebase's existing "no recognized value -> the safe default" rule
+// (see ABSENT_NO_SHOW_GRACE_MINUTES/similar constants on the backend) rather
+// than inventing a guess. This is a real, known limitation — see README.
+const STATUS_TO_PUNCH_TYPE = {
+  0: "Check-In",
+  1: "Check-Out",
+  2: "Break-Start", // device convention: "break out" = leaving for a break
+  3: "Break-End",   // "break in" = returning from a break
+  4: "Check-In",    // overtime-in — closest real analog in HRMS's enum
+  5: "Check-Out",   // overtime-out
+};
+function mapPunchType(status) {
+  return STATUS_TO_PUNCH_TYPE[status] ?? "Check-In";
+}
+
 async function onPunchBatch(records, sn) {
   const state = loadState();
   const lastSyncedTimestamp = state.lastSyncedTimestamp ? new Date(state.lastSyncedTimestamp) : null;
@@ -122,7 +141,7 @@ async function onPunchBatch(records, sn) {
     employeeId:     r.pin,
     deviceId:       ESSL_DEVICE_IP,
     punchTimestamp: r.dateTime,
-    punchType:      "Check-In",
+    punchType:      mapPunchType(r.status),
     source:         "eSSL",
     rawDeviceData:  r,
   }));
