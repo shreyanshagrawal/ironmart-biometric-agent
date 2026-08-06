@@ -9,17 +9,33 @@ import { logger, describeError } from "./logger.js";
 const MIN_UID = 1;
 const MAX_UID = 3000; // zkteco-js's own setUser/deleteUser validate this range
 
+// NOTE: `vpsBaseUrl` ALREADY ends in `/attendance` (index.js derives it from
+// VPS_INGEST_URL). Paths below must NOT repeat it — doing so produced
+// `/api/v1/attendance/attendance/device-users/pending`, which misses the
+// shared-secret routes (registered before the router's JWT gate) and falls
+// through to `authenticate`, returning a very misleading **401** rather than
+// a 404. That cost real debugging time; the URL is now included in the error
+// message so the same mistake is obvious immediately instead of looking like
+// a bad DEVICE_AGENT_TOKEN.
 async function fetchPendingJobs(vpsBaseUrl, deviceAgentToken) {
-  const res = await fetch(`${vpsBaseUrl}/attendance/device-users/pending`, {
+  const url = `${vpsBaseUrl}/device-users/pending`;
+  const res = await fetch(url, {
     headers: { Authorization: `Bearer ${deviceAgentToken}` },
   });
-  if (!res.ok) throw new Error(`Fetching pending jobs failed: ${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    throw new Error(
+      `Fetching pending jobs failed: ${res.status} ${res.statusText} (URL: ${url})` +
+        (res.status === 401
+          ? " — a 401 here usually means either a DEVICE_AGENT_TOKEN mismatch with the backend, OR that this URL is wrong (an unmatched path falls through to the JWT gate and reports 401, not 404). Check the URL above is exactly <backend>/api/v1/attendance/device-users/pending."
+          : "")
+    );
+  }
   const body = await res.json();
   return body?.data ?? [];
 }
 
 async function ackJob(vpsBaseUrl, deviceAgentToken, jobId, status, errorMessage) {
-  const res = await fetch(`${vpsBaseUrl}/attendance/device-users/${jobId}/ack`, {
+  const res = await fetch(`${vpsBaseUrl}/device-users/${jobId}/ack`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${deviceAgentToken}` },
     body: JSON.stringify({ status, errorMessage }),

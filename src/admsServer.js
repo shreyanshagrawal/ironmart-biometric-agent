@@ -124,11 +124,29 @@ export function startAdmsServer({ port, onPunchBatch, getLastSyncedUnixSec }) {
       return;
     }
 
-    // ── Attendance record push ────────────────────────────────────────────
-    if (req.method === "POST" && pathname === "/iclock/cdata" && table.toUpperCase() === "ATTLOG") {
+    // ── Data push (ATTLOG = punches; OPERLOG/others = acked, not stored) ──
+    // Must accept EVERY table the device pushes, not just ATTLOG. Returning
+    // 404 for OPERLOG made the device re-POST the identical operator log
+    // every ~5 seconds forever (confirmed in real logs) — the firmware
+    // retries until it gets a 2xx. We only parse ATTLOG; anything else is
+    // acknowledged so the device clears it from its queue and moves on.
+    if (req.method === "POST" && pathname === "/iclock/cdata") {
       let rawBody = "";
       req.on("data", (chunk) => { rawBody += chunk.toString(); });
       req.on("end", async () => {
+        const tableName = table.toUpperCase();
+
+        if (tableName !== "ATTLOG") {
+          // OPERLOG (admin/menu operations on the device), ATTPHOTO, etc.
+          // Nothing in HRMS consumes these today; ack so the device stops
+          // retrying. Logged at info (not warn) — this is normal traffic,
+          // not a problem, and shouldn't look like one in the log.
+          logger.info(`ADMS ${tableName || "(no table)"}  SN=${sn}  acknowledged (not stored — only ATTLOG is used).`);
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("OK: 0");
+          return;
+        }
+
         const records = parseAttLog(rawBody);
 
         if (records.length === 0) {
