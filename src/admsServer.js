@@ -23,6 +23,7 @@
 
 import { createServer } from "http";
 import { logger, describeError } from "./logger.js";
+import { recordDeviceContact } from "./heartbeat.js";
 
 /**
  * Parse the tab-delimited ATTLOG body the device pushes.
@@ -113,6 +114,12 @@ export function startAdmsServer({ port, onPunchBatch, getLastSyncedUnixSec }) {
     };
     const sn    = getParamCI("SN")    ?? "unknown";
     const table = getParamCI("table") ?? "";
+
+    // ANY request from the device counts as proof it's alive and on the
+    // network — recorded before routing so even an unhandled endpoint still
+    // updates liveness. This is what distinguishes "device is unplugged"
+    // from "agent is down" on the dashboard.
+    recordDeviceContact(sn);
 
     // ── Device heartbeat / handshake ──────────────────────────────────────
     if (req.method === "GET" && pathname === "/iclock/cdata") {

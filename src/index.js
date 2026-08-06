@@ -9,11 +9,20 @@
 // and timed out on the latter regardless of timeout duration. ZK TCP is kept
 // only for the write direction (setUser / deleteUser), where it works fine.
 
+import os from "os";
 import ZKLib from "zkteco-js";
 import { loadState, saveState } from "./state.js";
 import { logger, describeError } from "./logger.js";
 import { runUserSyncCycle } from "./userSync.js";
 import { startAdmsServer } from "./admsServer.js";
+import {
+  startHeartbeat,
+  agentStats,
+  recordDeviceContact,
+  recordPunchesPushed,
+  recordError,
+  clearError,
+} from "./heartbeat.js";
 
 // --- Process-level safety net for a confirmed real bug in zkteco-js ---
 // `readWithBuffer` in zkteco-js's ztcp.js calls `reject(err)` on a device
@@ -49,6 +58,12 @@ const DEVICE_AGENT_TOKEN = process.env.DEVICE_AGENT_TOKEN;
 // now event-driven (device pushes to us), so this interval only controls
 // how often the enrollment queue is checked.
 const POLL_INTERVAL_MINUTES = parseFloat(process.env.POLL_INTERVAL_MINUTES || "5");
+// Liveness ping to the backend so agent health is visible on the Developer
+// Dashboard without needing shell access to this machine.
+const HEARTBEAT_INTERVAL_MINUTES = parseFloat(process.env.HEARTBEAT_INTERVAL_MINUTES || "2");
+// Stable identity for this install. Defaults to the machine hostname so a
+// second agent (another office/site) never overwrites this one's status row.
+const AGENT_ID = process.env.AGENT_ID || `agent-${os.hostname()}`;
 // After this many consecutive failed user-sync polls, log a single escalated
 // warning (not on every failure — that's just noise).
 const CONSECUTIVE_FAILURE_WARNING_THRESHOLD = 3;
@@ -113,10 +128,23 @@ async function onPunchBatch(records, sn) {
   }));
 
   const result = await pushLogs(payload);
+  recordPunchesPushed(payload.length);
+  const unmatched = result?.data?.unmatchedCount ?? 0;
   logger.info(
     `SN=${sn}: pushed ${payload.length} new punch(es) — ` +
-    `inserted: ${result?.data?.insertedCount ?? "?"}, unmatched: ${result?.data?.unmatchedCount ?? "?"}`
+    `inserted: ${result?.data?.insertedCount ?? "?"}, unmatched: ${unmatched}`
   );
+  // An unmatched punch means the device PIN has no employee with that
+  // biometricDeviceCode in HRMS — the punch IS stored (visible under
+  // Attendance → Exceptions) but isn't attributed to anyone yet. Surface it
+  // in the heartbeat so this is visible remotely rather than only in a log
+  // file on a machine nobody can reach.
+  if (unmatched > 0) {
+    recordError(
+      `${unmatched} of ${payload.length} punch(es) had no matching employee ` +
+        `(set that employee's Biometric Device Code in HRMS to the device PIN).`
+    );
+  }
 
   // Advance watermark to the latest record in this batch.
   const maxTimestamp = newRecords.reduce(
@@ -161,8 +189,12 @@ async function runUserSyncOnce() {
       logger.info(`Device user sync recovered after ${consecutiveFailures} consecutive failure(s).`);
     }
     consecutiveFailures = 0;
+    agentStats.consecutiveUserSyncFailures = 0;
+    clearError();
   } catch (err) {
     consecutiveFailures++;
+    agentStats.consecutiveUserSyncFailures = consecutiveFailures;
+    recordError(describeError(err));
     logger.error(`User sync failed (${consecutiveFailures} consecutive): ${describeError(err)}`);
     if (consecutiveFailures === CONSECUTIVE_FAILURE_WARNING_THRESHOLD) {
       logger.warn(
@@ -187,6 +219,17 @@ async function main() {
     port:                ADMS_PORT,
     onPunchBatch,
     getLastSyncedUnixSec,
+  });
+
+  // Liveness reporting — makes agent health visible on the Developer
+  // Dashboard without needing shell access to this machine.
+  startHeartbeat({
+    vpsBaseUrl:       VPS_BASE_URL,
+    deviceAgentToken: DEVICE_AGENT_TOKEN,
+    agentId:          AGENT_ID,
+    deviceIp:         ESSL_DEVICE_IP,
+    admsPort:         ADMS_PORT,
+    intervalMinutes:  HEARTBEAT_INTERVAL_MINUTES,
   });
 
   // User enrollment sync — ZK TCP poll on a regular interval (write only)
