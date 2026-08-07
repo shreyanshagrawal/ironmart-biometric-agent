@@ -27,6 +27,26 @@ if (-not $nodePath) {
 Write-Host "Repo directory: $repoDir"
 Write-Host "Node.js: $nodePath"
 
+# Both scheduled tasks below run as SYSTEM, but this repo is owned by the
+# interactive user account that cloned it -- git's "dubious ownership"
+# safety check (CVE-2022-24765) refuses to operate across that mismatch by
+# default. Reproduced live: git rev-parse returns nothing under SYSTEM,
+# which then crashes the calling script on a null value one line later.
+# Affects BOTH the updater (scripts/update.ps1, every git command in it)
+# and the main agent itself (heartbeat.js shells out to `git rev-parse` to
+# report its own version -- silently falls back to "unknown" rather than
+# crashing, so this was invisible until actually checked). --system scope
+# (not --global) fixes it for every account on this machine at once,
+# including SYSTEM, in one place -- writing it here since this script
+# already requires the elevation needed to touch the system-wide gitconfig.
+$existingSafeDirs = git config --system --get-all safe.directory 2>$null
+if ($existingSafeDirs -notcontains $repoDir) {
+    git config --system --add safe.directory $repoDir
+    Write-Host "Added '$repoDir' to git's system-wide safe.directory list (fixes SYSTEM-context git commands)."
+} else {
+    Write-Host "'$repoDir' already in git's system-wide safe.directory list."
+}
+
 # --- Main agent task: starts at boot, restarts automatically if it exits ---
 $agentTaskName = "IronMartBiometricAgent"
 # --env-file=.env is required here: Scheduled Tasks don't load .env on
