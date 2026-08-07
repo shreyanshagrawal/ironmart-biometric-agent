@@ -83,6 +83,21 @@ function parseAttLog(body) {
  *
  * \r\n line endings are required by the ADMS spec.
  */
+// TransTimes controls when the device performs its SCHEDULED bulk-backlog
+// transmission — a separate mechanism from Realtime=1 (which only covers
+// brand-new events as they happen). The original value here, `00:00;14:05`,
+// was almost certainly unreviewed boilerplate (it matches generic ADMS
+// reference-implementation sample values seen elsewhere) — and it produced
+// a real, confirmed symptom: after a full watermark reset (ATTLOGStamp=0,
+// i.e. "send me your entire history"), the device correctly handshook but
+// then sent nothing at all, because the current time wasn't one of those
+// two narrow daily windows. Every hour on the hour instead of two arbitrary
+// fixed times, so a full-backlog catch-up is never more than ~1h away
+// regardless of when the agent's watermark gets reset. Realtime single
+// punches were never affected by this — they already worked correctly
+// under the old value too, since Realtime=1 is the mechanism for those.
+const HOURLY_TRANS_TIMES = Array.from({ length: 24 }, (_, h) => `${String(h).padStart(2, "0")}:00`).join(";");
+
 function buildHandshakeBody(sn, lastTimestampUnixSec) {
   const stamp = lastTimestampUnixSec ?? 0;
   return [
@@ -92,7 +107,7 @@ function buildHandshakeBody(sn, lastTimestampUnixSec) {
     `ATTPHOTOStamp=None`,    // not syncing photos
     `ErrorDelay=30`,
     `Delay=10`,
-    `TransTimes=00:00;14:05`,
+    `TransTimes=${HOURLY_TRANS_TIMES}`,
     `TransInterval=1`,
     `TransFlag=1111000000`,
     `Realtime=1`,            // push punches in real-time, don't batch
