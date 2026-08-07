@@ -1,7 +1,7 @@
 # Registers ONLY the updater Scheduled Task (checks GitHub every 15 min and
 # restarts the agent if a new commit was pulled). Use this if you installed
 # the main agent via NSSM (install-nssm-service.ps1) instead of
-# install-tasks.ps1's all-Task-Scheduler path — update.ps1 already knows how
+# install-tasks.ps1's all-Task-Scheduler path - update.ps1 already knows how
 # to detect and restart either an NSSM service or a Scheduled Task by name,
 # so this same updater task works with both setups.
 #

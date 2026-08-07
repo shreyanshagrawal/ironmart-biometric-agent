@@ -1,5 +1,5 @@
 # Registers the biometric agent (and its updater) as Windows Scheduled Tasks
-# that start automatically on boot — no third-party service wrapper needed.
+# that start automatically on boot - no third-party service wrapper needed.
 # Run this once, from an elevated ("Run as Administrator") PowerShell prompt,
 # from inside the cloned repo.
 #
@@ -30,19 +30,19 @@ Write-Host "Node.js: $nodePath"
 # --- Main agent task: starts at boot, restarts automatically if it exits ---
 $agentTaskName = "IronMartBiometricAgent"
 # --env-file=.env is required here: Scheduled Tasks don't load .env on
-# their own any more than a plain `node src/index.js` does — see the same
+# their own any more than a plain `node src/index.js` does - see the same
 # note in README.md's Quick Start section.
 $agentAction = New-ScheduledTaskAction -Execute $nodePath -Argument "--env-file=.env src\index.js" -WorkingDirectory $repoDir
 $agentTrigger = New-ScheduledTaskTrigger -AtStartup
 $agentSettings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
-    -ExecutionTimeLimit (New-TimeSpan -Seconds 0) # no time limit — this runs forever
+    -ExecutionTimeLimit (New-TimeSpan -Seconds 0) # no time limit - this runs forever
 $agentPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 
 Register-ScheduledTask -TaskName $agentTaskName `
     -Action $agentAction -Trigger $agentTrigger -Settings $agentSettings -Principal $agentPrincipal `
-    -Description "IronMart biometric agent — polls the ESSL K30 device and syncs punches/user enrollment to the HRMS backend." `
+    -Description "IronMart biometric agent - polls the ESSL K30 device and syncs punches/user enrollment to the HRMS backend." `
     -Force | Out-Null
 Write-Host "Registered scheduled task '$agentTaskName' (starts at boot, runs as SYSTEM)."
 

@@ -1,4 +1,4 @@
-# Self-update check for the biometric agent — Windows equivalent of
+# Self-update check for the biometric agent - Windows equivalent of
 # update.sh. Meant to run on a schedule (Task Scheduler), not as the
 # long-running agent process itself. See update.sh's header comment for
 # why this is a "pull on a timer" design rather than a push/webhook one.
@@ -22,7 +22,7 @@ Write-Host "[update.ps1] New commit(s) found: $localHead -> $remoteHead"
 
 $dirty = git status --porcelain
 if ($dirty) {
-    Write-Error "[update.ps1] Local working tree has uncommitted changes — refusing to pull. Resolve manually (git status), then re-run."
+    Write-Error "[update.ps1] Local working tree has uncommitted changes - refusing to pull. Resolve manually (git status), then re-run."
     exit 1
 }
 
@@ -35,7 +35,7 @@ if ($diff) {
 git pull --ff-only origin main
 
 if ($depsChanged) {
-    Write-Host "[update.ps1] package.json/package-lock.json changed — running npm install..."
+    Write-Host "[update.ps1] package.json/package-lock.json changed - running npm install..."
     npm install
 }
 
@@ -53,6 +53,6 @@ if ($svc) {
         Start-ScheduledTask -TaskName $serviceName
         Write-Host "[update.ps1] Restarted via Scheduled Task '$serviceName'."
     } else {
-        Write-Warning "[update.ps1] No service or scheduled task named '$serviceName' found — restart the agent manually. (If you followed README.md's Windows setup, this branch shouldn't run — check the name matches.)"
+        Write-Warning "[update.ps1] No service or scheduled task named '$serviceName' found - restart the agent manually. (If you followed README.md's Windows setup, this branch shouldn't run - check the name matches.)"
     }
 }

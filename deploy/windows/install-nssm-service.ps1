@@ -40,7 +40,7 @@ $serviceName = "IronMartBiometricAgent"
 
 Write-Host "Installing '$serviceName' as a Windows Service via NSSM..."
 # --env-file=.env is required: NSSM does not load .env on its own, same as
-# a plain `node src/index.js` — see README.md's Quick Start note.
+# a plain `node src/index.js` - see README.md's Quick Start note.
 & $nssm install $serviceName $nodePath "--env-file=.env src\index.js"
 & $nssm set $serviceName AppDirectory $repoDir
 & $nssm set $serviceName AppEnvironmentExtra "NODE_ENV=production"
@@ -65,4 +65,4 @@ Write-Host "  Stop-Service $serviceName"
 Write-Host "  nssm remove $serviceName confirm   # uninstall"
 Write-Host ""
 Write-Host "For the auto-update task (checks GitHub every 15 min), still run install-tasks.ps1"
-Write-Host "separately — it detects and restarts this NSSM service automatically (see update.ps1)."
+Write-Host "separately - it detects and restarts this NSSM service automatically (see update.ps1)."
