@@ -52,7 +52,16 @@ $psPath = (Get-Command powershell).Source
 $updaterAction = New-ScheduledTaskAction -Execute $psPath `
     -Argument "-ExecutionPolicy Bypass -File `"$repoDir\scripts\update.ps1`"" `
     -WorkingDirectory $repoDir
-$updaterTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration ([TimeSpan]::MaxValue)
+# [TimeSpan]::MaxValue looks like the obvious way to say "repeat forever",
+# but it's a real, reproduced bug: it serializes to a Duration of
+# P99999999DT23H59M59S in the task's XML, which exceeds what Windows Task
+# Scheduler's own schema actually accepts -- Register-ScheduledTask fails
+# with "The task XML contains a value which is incorrectly formatted or out
+# of range." There's no native "forever" repetition in Task Scheduler; the
+# standard, working substitute is a large-but-valid bounded duration. 10
+# years is effectively permanent for this use case (re-running
+# install-tasks.ps1 at any point resets it anyway).
+$updaterTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration (New-TimeSpan -Days 3650)
 $updaterPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 
 Register-ScheduledTask -TaskName $updaterTaskName `
