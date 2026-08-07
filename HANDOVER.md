@@ -133,10 +133,25 @@ remotely, this isn't.
 HRMS has `X` as their **Biometric Device Code**. The punch is stored (visible
 under **Attendance → Exceptions**) but isn't attributed to anyone.
 
-For each employee enrolled on the device: HRMS → **Employees** → edit →
-set **Biometric Device Code** to their PIN on the device. Once set, new
-punches attribute automatically, and HRMS will also push the enrollment back
-to the device via the user-sync queue (**Attendance → Device Sync**).
+The device only knows people by PIN — to know which PIN is which real
+employee, run this on the office machine (reads `ESSL_DEVICE_IP`/`PORT` from
+`.env` the same way the agent does):
+
+```cmd
+node scripts/list-device-users.mjs
+```
+
+This prints every PIN enrolled on the device next to the name that was typed
+in at enrollment time. For each real employee it lists: HRMS → **Employees**
+→ edit → set **Biometric Device Code** to their PIN. Once set:
+- HRMS pushes the enrollment back to the device via the user-sync queue
+  (**Attendance → Device Sync**), same as before.
+- **Any punches that already arrived from that PIN before you set the
+  mapping are automatically backfilled** into real attendance records the
+  moment you save — you do not need a separate re-sync step, and nothing
+  from before the mapping was lost. (A device typically has real people
+  punching for days before every PIN gets mapped in HRMS — this is what
+  keeps that backlog from being silently dropped.)
 
 ## 6. Confirm remote monitoring actually works
 
