@@ -31,7 +31,17 @@ async function fetchPendingJobs(vpsBaseUrl, deviceAgentToken) {
     );
   }
   const body = await res.json();
-  return body?.data ?? [];
+  // The backend's response envelope wraps a LIST endpoint's array a second
+  // level deep: `successResponse(array, msg)` produces `{data: {data: array,
+  // message}}` on the wire (see backend/src/common/utils/apiResponse.ts +
+  // response.middleware.ts) -- this app's real axios client auto-strips one
+  // level of that for every other caller, but this agent uses plain fetch()
+  // and never gets that unwrap. `body?.data` alone is therefore the
+  // `{data, message}` wrapper object, not the array -- truthy, no `.length`
+  // (logged as "Found undefined pending job(s)"), and not iterable
+  // (`for...of` threw "jobs is not iterable"). Confirmed via a direct read
+  // of the actual backend response-building code, not guessed.
+  return body?.data?.data ?? [];
 }
 
 async function ackJob(vpsBaseUrl, deviceAgentToken, jobId, status, errorMessage) {
