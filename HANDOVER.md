@@ -24,7 +24,24 @@ forwards them to the HRMS backend. Confirmed in real logs:
 `unmatched: 1` means the punch was stored but not attributed to an employee —
 see step 5.
 
-**Not yet done:** steps 1–6 below.
+**Update 2026-08-07:** step 4 (start on boot + auto-update) is done and
+confirmed live on the CHETNA machine. Getting there surfaced three real,
+previously-unhit Windows-specific bugs along the way, all fixed:
+- An em-dash inside a `.ps1` string literal broke parsing under Windows
+  PowerShell 5.1's default (non-UTF-8) codepage handling for BOM-less files.
+- `[TimeSpan]::MaxValue` as a "repeat forever" trigger duration produces a
+  value Task Scheduler's own XML schema rejects as out of range.
+- Git's dubious-ownership check (CVE-2022-24765) blocked every git command
+  run by the SYSTEM-context Scheduled Tasks, since the repo is owned by the
+  interactive `Admin` account — fixed with a `--system`-scope
+  `safe.directory` entry, applied automatically by `install-tasks.ps1`.
+
+`scripts/update.ps1` now also logs its own real output/errors to
+`logs\update.log` (it previously ran silently under the Scheduled Task,
+so a failure was invisible beyond a bare `LastTaskResult` code) — check
+that file first if the updater ever looks stuck again.
+
+**Not yet done:** steps 1, 2, 3, 5, 6 below.
 
 ---
 
