@@ -11,6 +11,20 @@
 import { readFileSync, existsSync } from "fs";
 import ZKLib from "zkteco-js";
 
+// Same confirmed real bug in zkteco-js as index.js already guards against
+// (see its own top-of-file comment): readWithBuffer() rejects on timeout
+// but falls through to decodeTCPHeader(null.subarray(...)) anyway, inside
+// an unawaited Promise executor completely separate from the call this
+// script actually awaits/catches below. Without this, that second, orphaned
+// throw kills the whole process a moment after the real error was already
+// caught and logged.
+process.on("unhandledRejection", (reason) => {
+  console.error(`Unhandled promise rejection (likely the known zkteco-js readWithBuffer bug) — ignoring: ${reason?.err?.message || reason?.message || reason}`);
+});
+process.on("uncaughtException", (err) => {
+  console.error(`Uncaught exception — ignoring: ${err?.message || err}`);
+});
+
 function loadEnvFallback() {
   if (!existsSync(".env")) return {};
   const out = {};

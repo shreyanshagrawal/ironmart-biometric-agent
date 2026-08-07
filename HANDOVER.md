@@ -134,16 +134,14 @@ HRMS has `X` as their **Biometric Device Code**. The punch is stored (visible
 under **Attendance → Exceptions**) but isn't attributed to anyone.
 
 The device only knows people by PIN — to know which PIN is which real
-employee, run this on the office machine (reads `ESSL_DEVICE_IP`/`PORT` from
-`.env` the same way the agent does):
-
-```cmd
-node scripts/list-device-users.mjs
-```
-
-This prints every PIN enrolled on the device next to the name that was typed
-in at enrollment time. For each real employee it lists: HRMS → **Employees**
-→ edit → set **Biometric Device Code** to their PIN. Once set:
+employee, the plan was to run `node scripts/list-device-users.mjs` on the
+office machine. **On this specific device that does not work** — confirmed
+live: it hits the same ZK-TCP-bulk-read timeout documented below in Known
+Limitations. Use the device's own physical menu instead (**Menu → User
+Mgmt → All Users** shows each enrolled ID + name on its own screen) or
+whatever software was originally used to enroll everyone with names. Once
+you know a PIN → name pairing: HRMS → **Employees** → edit → set
+**Biometric Device Code** to their PIN. Once set:
 - HRMS pushes the enrollment back to the device via the user-sync queue
   (**Attendance → Device Sync**), same as before.
 - **Any punches that already arrived from that PIN before you set the
@@ -190,17 +188,33 @@ it's down, delivery pauses; it doesn't destroy the mail.
 
 ## Known limitations (stated plainly)
 
-- **Device user enrollment (HRMS → device) has never been tested against real
-  hardware.** The punch direction is confirmed working end-to-end; the write
-  direction (`setUser`/`deleteUser`) is code-reviewed and mock-tested only.
-  Watch the first real enrollment closely via Attendance → Device Sync.
+- **Device user enrollment (HRMS → device) is CONFIRMED NOT WORKING against
+  this device's firmware — upgraded from "untested" after real evidence.**
+  `zk.getUsers()` (zkteco-js's ZK TCP user-list read) times out against the
+  real device (`TIMEOUT_IN_RECEIVING_RESPONSE_AFTER_REQUESTING_DATA`, the
+  same failure mode already documented below for bulk reads generally).
+  Both directions of the device-user-sync feature depend on this call —
+  `resolveDeviceUid()` (enroll/update) calls it first to find a free/existing
+  slot, and the Disable path calls it directly to find the user to remove —
+  so **neither direction currently works on this hardware**, not just an
+  unverified caveat. Jobs will sit in the queue retrying and failing forever
+  (harmless — see the table above — but they will never actually succeed).
+  `scripts/list-device-users.mjs` hits the identical failure for the same
+  reason (it's the same `getUsers()` call) — **it will not produce output on
+  this device**, only confirm the same timeout. To get a real PIN → name
+  cross-reference on this hardware, use the device's own physical menu
+  (**Menu → User Mgmt → All Users**, shows each enrolled ID + name on the
+  device's own screen) or whatever enrollment software was originally used to
+  type names in (the same "eSSL"-branded comm software referenced in step 1's
+  comm-password setup, if still installed) — not this repo's tooling.
 - **ZK TCP bulk reads do not work on this device's firmware.** Confirmed with
   a raw-protocol probe (`scripts/diagnose-protocol.mjs`): the device replies
   to `CMD_CONNECT` with command ID `6001` and to `CMD_GET_FREE_SIZES` with
   `2032` — neither is a standard ACK code, and no data payload follows. This
-  is why punch sync uses ADMS push instead. The same non-standard replies may
-  affect `setUser`/`deleteUser`, which is the real reason the caveat above
-  matters.
+  is why punch sync uses ADMS push instead. `getUsers()`'s real, reproduced
+  timeout (above) confirms this same incompatibility extends to every ZK TCP
+  bulk-read command, not just the punch log — a genuine firmware limitation
+  on this specific device, not a bug in this codebase's own request-building.
 - **Auto-update polls every 15 min**, not instantly — the office machine has
   no inbound reachability for a webhook. Lower the interval in the Scheduled
   Task if you need it faster.
