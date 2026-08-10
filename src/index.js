@@ -1,72 +1,82 @@
 // @ts-nocheck
 // Standalone agent: receives attendance pushes from the ESSL K30 biometric
 // device via the ADMS HTTP protocol and forwards them to the IronMart HRMS
-// backend; also pulls pending "enroll/remove this employee" jobs from the
-// backend and applies them to the device via ZK TCP (the write direction).
+// backend. That is the agent's ENTIRE job — it reads punches and sends them
+// on. It never writes anything back to the device.
 //
 // Punch sync uses ADMS push (device calls us) rather than ZK TCP pull (us
 // polling the device) — the device's firmware reliably implements the former
-// and timed out on the latter regardless of timeout duration. ZK TCP is kept
-// only for the write direction (setUser / deleteUser), where it works fine.
+// and timed out on the latter regardless of timeout duration.
+//
+// ── Why there is no device-write path here anymore (2026-08-10) ────────────
+// This agent used to also poll the backend for "enroll/remove this employee
+// on the device" jobs and apply them over ZK TCP (setUser/deleteUser). That
+// has been removed entirely, for two independent reasons — both real, not
+// theoretical:
+//
+//   1. It was a confirmed hazard to the thing that actually matters. This
+//      device's ZK TCP stack is known-broken (documented in HANDOVER.md:
+//      getUsers() times out with TIMEOUT_IN_RECEIVING_RESPONSE_AFTER_
+//      REQUESTING_DATA, and CMD_CONNECT answers with a non-standard 6001).
+//      The agent only ever opened a ZK TCP socket when a job was pending —
+//      and a job was created by exactly one event: HR setting an employee's
+//      Biometric Device Code in HRMS. So "someone was fed into HRMS" was the
+//      precise trigger for the agent to start hammering a broken socket on
+//      the device for up to 60s at a time, on a repeating 5-minute cycle. On
+//      ESSL/ZK firmware a wedged comm session is a well-known cause of the
+//      device halting its ADMS cloud push — i.e. punches stopping entirely.
+//      Reported symptom matched exactly: feed a person in, punches stop.
+//
+//   2. Even on the success path it was destructive. setUser(uid, ...)
+//      overwrites the device's whole user record at that slot; on this class
+//      of device that can drop the enrolled fingerprint template, leaving a
+//      real person physically unable to punch — silently, and only for them.
+//
+// Enrollment is therefore done ON THE DEVICE by a human (Menu -> User Mgmt),
+// and HRMS is read/match-only: you type that person's device PIN into their
+// Biometric Device Code field and the backend attributes their punches (and
+// backfills any that already arrived before the mapping existed). The device
+// remains the source of truth for who is enrolled. Do not re-add a write
+// path here without real hardware to verify it against.
 
 import os from "os";
-import ZKLib from "zkteco-js";
 import { loadState, saveState } from "./state.js";
 import { logger, describeError } from "./logger.js";
-import { runUserSyncCycle } from "./userSync.js";
 import { startAdmsServer } from "./admsServer.js";
 import {
   startHeartbeat,
   agentStats,
-  recordDeviceContact,
   recordPunchesPushed,
   recordError,
   clearError,
 } from "./heartbeat.js";
 
-// --- Process-level safety net for a confirmed real bug in zkteco-js ---
-// `readWithBuffer` in zkteco-js's ztcp.js calls `reject(err)` on a device
-// timeout but is missing a `return` afterward, so it falls through into
-// `decodeTCPHeader(reply.subarray(...))` with `reply` still null. That
-// throw happens inside an unawaited async Promise executor — completely
-// separate from the promise our code actually awaits (which is already
-// correctly handled by our own try/catch). These handlers stop Node from
-// killing the process over that orphaned rejection; they do not change how
-// our own error handling behaves. Still needed because ZK TCP is used for
-// the write direction (setUser / deleteUser).
+// --- Process-level safety net ---------------------------------------------
+// This process is unattended on a machine nobody may be able to log into, so
+// an unhandled rejection killing it would silently end attendance collection
+// until someone noticed. Log and keep running instead.
 process.on("unhandledRejection", (reason) => {
-  logger.error(
-    `Unhandled promise rejection (likely the known zkteco-js readWithBuffer bug — see README "Known limitations") — agent continues running: ${describeError(reason)}`
-  );
+  logger.error(`Unhandled promise rejection — agent continues running: ${describeError(reason)}`);
 });
 process.on("uncaughtException", (err) => {
   logger.error(`Uncaught exception — agent continues running: ${describeError(err)}`);
 });
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const ESSL_DEVICE_IP   = process.env.ESSL_DEVICE_IP   || "192.168.1.201";
-const ESSL_DEVICE_PORT = parseInt(process.env.ESSL_DEVICE_PORT || "4370", 10);
-// Timeout for ZK TCP commands (setUser / deleteUser only — punch sync no
-// longer uses ZK TCP at all, so this no longer affects punch reliability).
-const ESSL_DEVICE_TIMEOUT_MS = parseInt(process.env.ESSL_DEVICE_TIMEOUT_MS || "60000", 10);
+// Identifies the device in the punch payload and on the health dashboard.
+// No TCP connection is ever made to it — the device connects to us.
+const ESSL_DEVICE_IP = process.env.ESSL_DEVICE_IP || "192.168.1.201";
 // Port this agent's ADMS HTTP server listens on. Must match what is entered
 // in the device's Cloud Server Settings → Server Address field.
 const ADMS_PORT = parseInt(process.env.ADMS_PORT || "7788", 10);
-const VPS_INGEST_URL     = process.env.VPS_INGEST_URL;
+const VPS_INGEST_URL = process.env.VPS_INGEST_URL;
 const DEVICE_AGENT_TOKEN = process.env.DEVICE_AGENT_TOKEN;
-// How often to poll for pending device-user enrollment jobs. Punch sync is
-// now event-driven (device pushes to us), so this interval only controls
-// how often the enrollment queue is checked.
-const POLL_INTERVAL_MINUTES = parseFloat(process.env.POLL_INTERVAL_MINUTES || "5");
 // Liveness ping to the backend so agent health is visible on the Developer
 // Dashboard without needing shell access to this machine.
 const HEARTBEAT_INTERVAL_MINUTES = parseFloat(process.env.HEARTBEAT_INTERVAL_MINUTES || "2");
 // Stable identity for this install. Defaults to the machine hostname so a
 // second agent (another office/site) never overwrites this one's status row.
 const AGENT_ID = process.env.AGENT_ID || `agent-${os.hostname()}`;
-// After this many consecutive failed user-sync polls, log a single escalated
-// warning (not on every failure — that's just noise).
-const CONSECUTIVE_FAILURE_WARNING_THRESHOLD = 3;
 
 if (!VPS_INGEST_URL) {
   logger.error("VPS_INGEST_URL is required (e.g. https://hrms.example.com/api/v1/attendance/device-logs/ingest)");
@@ -77,8 +87,8 @@ if (!DEVICE_AGENT_TOKEN) {
   process.exit(1);
 }
 
-// Derive the base attendance URL from the ingest URL so user-sync endpoints
-// can be built without a second config variable.
+// Derive the base attendance URL from the ingest URL so the heartbeat
+// endpoint can be built without a second config variable.
 const VPS_BASE_URL = VPS_INGEST_URL.replace(/\/attendance\/device-logs\/ingest\/?$/, "/attendance");
 
 // ── Backend push ────────────────────────────────────────────────────────────
@@ -103,15 +113,16 @@ async function pushLogs(logs) {
 // records. Filters records already covered by the watermark (belt-and-
 // suspenders on top of the ATTLOGStamp the handshake already set on the
 // device side), pushes new ones to the backend, and advances the watermark.
-// The watermark only moves after a confirmed successful backend push — same
-// guarantee as the old poll model, nothing is ever silently dropped.
+// The watermark only moves after a confirmed successful backend push — if the
+// push throws, it stays put and the same records are retried, so nothing is
+// ever silently dropped, only delayed.
 // HRMS's punch_type enum is Check-In | Check-Out | Break-Start | Break-End —
 // no generic "unknown". Only the 4 documented ZKTeco ADMS status codes with
 // a real match get mapped explicitly; anything else (including this
-// device's own confirmed 255 sentinel) falls back to Check-In, matching
-// this codebase's existing "no recognized value -> the safe default" rule
-// (see ABSENT_NO_SHOW_GRACE_MINUTES/similar constants on the backend) rather
-// than inventing a guess. This is a real, known limitation — see README.
+// device's own confirmed 255 sentinel) falls back to Check-In. Note this
+// mislabelling does NOT corrupt computed attendance hours: the backend
+// derives first-check-in/last-check-out by timestamp ordering, not by this
+// label. See README.
 const STATUS_TO_PUNCH_TYPE = {
   0: "Check-In",
   1: "Check-Out",
@@ -163,6 +174,8 @@ async function onPunchBatch(records, sn) {
       `${unmatched} of ${payload.length} punch(es) had no matching employee ` +
         `(set that employee's Biometric Device Code in HRMS to the device PIN).`
     );
+  } else {
+    clearError();
   }
 
   // Advance watermark to the latest record in this batch.
@@ -182,60 +195,16 @@ function getLastSyncedUnixSec() {
   return Math.floor(new Date(state.lastSyncedTimestamp).getTime() / 1000);
 }
 
-// ── Device user sync (ZK TCP write direction) ───────────────────────────────
-// Punch sync no longer touches ZK TCP. This is the only remaining use of
-// zkteco-js — for setUser / deleteUser (short commands that work reliably).
-async function syncDeviceUsers() {
-  const result = await runUserSyncCycle({
-    ZKLib,
-    esslIp:           ESSL_DEVICE_IP,
-    esslPort:         ESSL_DEVICE_PORT,
-    vpsBaseUrl:       VPS_BASE_URL,
-    deviceAgentToken: DEVICE_AGENT_TOKEN,
-    esslTimeoutMs:    ESSL_DEVICE_TIMEOUT_MS,
-  });
-  if (result.processed > 0) {
-    logger.info(`Device user sync: ${result.succeeded ?? 0} succeeded, ${result.failed ?? 0} failed.`);
-  }
-}
-
-let consecutiveFailures = 0;
-
-async function runUserSyncOnce() {
-  try {
-    await syncDeviceUsers();
-    if (consecutiveFailures > 0) {
-      logger.info(`Device user sync recovered after ${consecutiveFailures} consecutive failure(s).`);
-    }
-    consecutiveFailures = 0;
-    agentStats.consecutiveUserSyncFailures = 0;
-    clearError();
-  } catch (err) {
-    consecutiveFailures++;
-    agentStats.consecutiveUserSyncFailures = consecutiveFailures;
-    recordError(describeError(err));
-    logger.error(`User sync failed (${consecutiveFailures} consecutive): ${describeError(err)}`);
-    if (consecutiveFailures === CONSECUTIVE_FAILURE_WARNING_THRESHOLD) {
-      logger.warn(
-        `Device or network has failed ${consecutiveFailures} user-sync polls in a row. ` +
-        `Pending enrollment jobs are NOT lost — they remain Pending on the backend and will ` +
-        `be retried on the next successful cycle. Check the device/network if it doesn't self-recover.`
-      );
-    }
-  }
-}
-
 // ── Main ────────────────────────────────────────────────────────────────────
 async function main() {
   logger.info(
-    `Biometric agent starting. Device: ${ESSL_DEVICE_IP}:${ESSL_DEVICE_PORT}, ` +
-    `ADMS port: ${ADMS_PORT}, user-sync interval: ${POLL_INTERVAL_MINUTES}min, ` +
-    `target: ${VPS_INGEST_URL}`
+    `Biometric agent starting. Device: ${ESSL_DEVICE_IP} (push-only, no outbound device connection), ` +
+    `ADMS port: ${ADMS_PORT}, target: ${VPS_INGEST_URL}`
   );
 
   // Punch sync — ADMS push server (device calls us; no polling needed)
   startAdmsServer({
-    port:                ADMS_PORT,
+    port: ADMS_PORT,
     onPunchBatch,
     getLastSyncedUnixSec,
   });
@@ -251,21 +220,9 @@ async function main() {
     intervalMinutes:  HEARTBEAT_INTERVAL_MINUTES,
   });
 
-  // User enrollment sync — ZK TCP poll on a regular interval (write only)
-  const intervalMs = POLL_INTERVAL_MINUTES * 60 * 1000;
-  let running = false;
-  const tick = async () => {
-    if (running) return;
-    running = true;
-    try {
-      await runUserSyncOnce();
-    } finally {
-      running = false;
-    }
-  };
-
-  await tick();
-  setInterval(tick, intervalMs);
+  // Nothing else to schedule: punches arrive by device push, health goes out
+  // on the heartbeat timer. The process just stays up serving the ADMS port.
+  agentStats.consecutiveUserSyncFailures = 0;
 }
 
 main();

@@ -159,8 +159,10 @@ Mgmt → All Users** shows each enrolled ID + name on its own screen) or
 whatever software was originally used to enroll everyone with names. Once
 you know a PIN → name pairing: HRMS → **Employees** → edit → set
 **Biometric Device Code** to their PIN. Once set:
-- HRMS pushes the enrollment back to the device via the user-sync queue
-  (**Attendance → Device Sync**), same as before.
+- Nothing is pushed back to the device. Enrollment happens **on the device**,
+  by a human; HRMS is read/match-only, and the device stays the source of
+  truth for who is enrolled. (The old HRMS → device push was removed on
+  2026-08-10 — see "Known limitations" for why it was actively harmful.)
 - **Any punches that already arrived from that PIN before you set the
   mapping are automatically backfilled** into real attendance records the
   moment you save — you do not need a separate re-sync step, and nothing
@@ -205,8 +207,23 @@ it's down, delivery pauses; it doesn't destroy the mail.
 
 ## Known limitations (stated plainly)
 
-- **Device user enrollment (HRMS → device) is CONFIRMED NOT WORKING against
-  this device's firmware — upgraded from "untested" after real evidence.**
+- **Device user enrollment (HRMS → device) has been REMOVED from the agent
+  entirely (2026-08-10), not just documented as broken.** It was worse than
+  non-functional — it was actively taking the device down. The agent only
+  opened a ZK TCP socket when an enrollment job was pending, and a job was
+  created by exactly one event: HR setting an employee's Biometric Device
+  Code in HRMS. So "a person was fed into HRMS" was the precise trigger for
+  the agent to start hammering this device's known-broken ZK TCP stack (see
+  the next bullet) for up to 60s at a time on a repeating 5-minute cycle —
+  and on ESSL/ZK firmware a wedged comm session is a well-known cause of the
+  device halting its ADMS push, i.e. **punches stopping altogether**. That
+  was the reported real-world symptom. Separately, on the success path
+  `setUser()` overwrites the device's whole user record at that slot, which
+  on this class of device can drop the enrolled fingerprint template and
+  leave one real person silently unable to punch at all.
+  Enrollment is now a human action on the device itself; HRMS is
+  read/match-only. **Do not re-add a device-write path without real hardware
+  to verify against.** The original evidence that it never worked anyway:
   `zk.getUsers()` (zkteco-js's ZK TCP user-list read) times out against the
   real device (`TIMEOUT_IN_RECEIVING_RESPONSE_AFTER_REQUESTING_DATA`, the
   same failure mode already documented below for bulk reads generally).
