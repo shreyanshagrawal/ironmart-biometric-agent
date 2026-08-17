@@ -125,8 +125,13 @@ function buildHandshakeBody(sn, lastTimestampUnixSec) {
  * @param {Function} opts.getLastSyncedUnixSec - () => number
  *                                               returns the last-synced Unix timestamp in
  *                                               seconds, used for the ATTLOGStamp handshake
+ * @param {Function} [opts.onDeviceEvent]      - async (tableName, rawBody, sn) => void
+ *                                               called for every NON-ATTLOG table the device
+ *                                               pushes (OPERLOG, USERINFO, ...). Optional:
+ *                                               if omitted the payload is acked and dropped,
+ *                                               exactly as before.
  */
-export function startAdmsServer({ port, onPunchBatch, getLastSyncedUnixSec }) {
+export function startAdmsServer({ port, onPunchBatch, getLastSyncedUnixSec, onDeviceEvent }) {
   const server = createServer((req, res) => {
     const rawUrl = req.url ?? "/";
     const url = new URL(rawUrl, "http://localhost");
@@ -177,13 +182,32 @@ export function startAdmsServer({ port, onPunchBatch, getLastSyncedUnixSec }) {
         const tableName = table.toUpperCase();
 
         if (tableName !== "ATTLOG") {
-          // OPERLOG (admin/menu operations on the device), ATTPHOTO, etc.
-          // Nothing in HRMS consumes these today; ack so the device stops
-          // retrying. Logged at info (not warn) — this is normal traffic,
-          // not a problem, and shouldn't look like one in the log.
-          logger.info(`ADMS ${tableName || "(no table)"}  SN=${sn}  acknowledged (not stored — only ATTLOG is used).`);
+          // OPERLOG (operator actions on the device — enrollments, deletions,
+          // edits), USERINFO (its user list), ATTPHOTO, etc.
+          //
+          // These used to be acked and discarded. They are in fact the only
+          // record of who is enrolled on the terminal and what changed, which
+          // is what HRMS needs to explain PINs/slots moving under people — so
+          // they are now forwarded upstream.
+          //
+          // The ack is UNCONDITIONAL and happens whether forwarding works or
+          // not. Returning a non-2xx makes this firmware re-POST the identical
+          // body every ~5 seconds forever (confirmed in real logs), so a
+          // backend hiccup must never be allowed to turn into a retry storm
+          // against a device whose comm stack is already fragile. Losing one
+          // event row is far cheaper than that.
           res.writeHead(200, { "Content-Type": "text/plain" });
           res.end("OK: 0");
+
+          if (typeof onDeviceEvent === "function" && rawBody) {
+            // Deliberately not awaited: the device already has its answer, and
+            // nothing about this path should hold the socket open.
+            Promise.resolve(onDeviceEvent(tableName, rawBody, sn)).catch((err) => {
+              logger.warn(`Device event forward failed (${tableName}): ${describeError(err)}`);
+            });
+          } else {
+            logger.info(`ADMS ${tableName || "(no table)"}  SN=${sn}  acknowledged (not forwarded).`);
+          }
           return;
         }
 

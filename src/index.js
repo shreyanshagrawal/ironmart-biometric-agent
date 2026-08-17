@@ -108,6 +108,43 @@ async function pushLogs(logs) {
   return res.json();
 }
 
+/**
+ * Forward a non-ATTLOG table (OPERLOG, USERINFO, ...) to the backend.
+ *
+ * Receive-only: this reports what the device volunteered. It never sends a
+ * command to the device — that path is permanently closed, because opening a
+ * ZK session on this unit halts its punch push entirely.
+ *
+ * Why it matters: HRMS otherwise has no idea what the terminal actually holds.
+ * It trusts a hand-typed Biometric Device Code, so when someone is re-enrolled
+ * and their PIN or slot moves, attribution shifts with no trace anywhere. These
+ * tables are that trace.
+ *
+ * Failures are logged and swallowed by the caller — the device has already been
+ * acked by then, and must never be made to retry because of a backend problem.
+ */
+async function pushDeviceEvent(tableName, rawBody, sn) {
+  const res = await fetch(`${VPS_BASE_URL}/device-events`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${DEVICE_AGENT_TOKEN}`,
+    },
+    body: JSON.stringify({ tableName, rawBody, deviceSerialNumber: sn ?? null }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Device event push failed: ${res.status} ${res.statusText} ${body}`);
+  }
+  const json = await res.json().catch(() => null);
+  const stored = json?.data?.stored ?? 0;
+  const roster = json?.data?.rosterUpdated ?? 0;
+  logger.info(
+    `Device event ${tableName} forwarded (${stored} line(s) stored` +
+      (roster > 0 ? `, ${roster} roster entr(ies) updated` : "") + ").",
+  );
+}
+
 // ── ADMS punch handler ──────────────────────────────────────────────────────
 // Called by admsServer.js whenever the device pushes a batch of ATTLOG
 // records. Filters records already covered by the watermark (belt-and-
@@ -207,6 +244,7 @@ async function main() {
     port: ADMS_PORT,
     onPunchBatch,
     getLastSyncedUnixSec,
+    onDeviceEvent: pushDeviceEvent,
   });
 
   // Liveness reporting — makes agent health visible on the Developer
