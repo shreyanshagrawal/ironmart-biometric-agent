@@ -103,7 +103,25 @@ function buildHandshakeBody(sn, lastTimestampUnixSec) {
   return [
     `GET OPTION FROM:${sn}`,
     `ATTLOGStamp=${stamp}`,
-    `OPERLOGStamp=9999`,     // not syncing operator logs
+    // Operator logs: enrollments, deletions and user edits performed ON the
+    // terminal, plus the USERINFO records that carry PIN -> name. This is the
+    // only remote view of what the device actually holds; HRMS otherwise
+    // matches punches against a hand-typed code with no way to know the device
+    // disagrees, which is what made attendance appear to shift unpredictably.
+    //
+    // Was `9999`, which claims "already current" and suppresses them entirely.
+    // 0 asks for the full history once -- deliberately, because the backlog IS
+    // the evidence of who moved slots and when. Operator logs are low volume
+    // next to attendance, so this is a one-off catch-up, not a flood.
+    //
+    // RISK, and why this is called out rather than buried: changing a stamp on
+    // this device has stopped data before. A previous ATTLOGStamp reset left it
+    // handshaking correctly and then sending NOTHING, because TransTimes only
+    // had two narrow daily windows. That specific cause is fixed (hourly
+    // TransTimes below), and OPERLOGStamp is a different channel from ATTLOG --
+    // but the precedent is real. After deploying, confirm punches still arrive.
+    // Reverting is a one-line change: the agent auto-updates within 15 minutes.
+    `OPERLOGStamp=0`,
     `ATTPHOTOStamp=None`,    // not syncing photos
     `ErrorDelay=30`,
     `Delay=10`,
