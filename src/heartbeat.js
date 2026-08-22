@@ -57,18 +57,29 @@ export const agentStats = {
 };
 
 /**
- * Records the handshake's query parameters, and logs them ONLY when they change.
+ * Accumulates whatever the device reveals about itself, from ANY request.
  *
- * The device handshakes every few seconds; logging the set every time would
- * bury everything else in the file. Logging on change means it appears once at
- * startup and again only if the device is reconfigured or replaced — which is
- * exactly when it matters.
+ * Originally this only captured the GET /iclock/cdata handshake, on the
+ * assumption the device handshakes regularly. It does not: after the agent
+ * auto-updated and restarted, the in-memory value stayed null while punches
+ * kept arriving, because this firmware handshakes on connect and thereafter
+ * only POSTs data and polls for commands. A restart therefore lost the
+ * information until the device happened to reconnect.
+ *
+ * Parameters are MERGED rather than replaced, so a sparse request (a punch POST
+ * carrying only SN) cannot erase the richer set a handshake provided. Different
+ * request types reveal different fields, and together they are strictly more
+ * information than any one of them.
+ *
+ * Logged only when the merged set actually changes — the device contacts this
+ * server every few seconds, and logging each time would bury the file.
  */
 export function recordHandshakeParams(params) {
-  const serialized = JSON.stringify(params);
+  const merged = { ...(agentStats.lastHandshakeParams ?? {}), ...params };
+  const serialized = JSON.stringify(merged);
   if (serialized === JSON.stringify(agentStats.lastHandshakeParams)) return;
-  agentStats.lastHandshakeParams = params;
-  logger.info(`ADMS handshake parameters (changed or first seen): ${serialized}`);
+  agentStats.lastHandshakeParams = merged;
+  logger.info(`Device parameters (new or changed): ${serialized}`);
 }
 
 export function recordDeviceContact(sn) {

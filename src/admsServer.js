@@ -177,17 +177,19 @@ export function startAdmsServer({ port, onPunchBatch, getLastSyncedUnixSec, onDe
     // from "agent is down" on the dashboard.
     recordDeviceContact(sn);
 
+    // Capture whatever this request reveals about the device. Done for every
+    // request, not just the handshake: this firmware handshakes on connect and
+    // then only POSTs data, so a handshake-only capture is lost on every agent
+    // restart and does not come back until the device reconnects. Merged
+    // upstream, so a sparse punch POST cannot overwrite richer handshake data.
+    recordHandshakeParams(Object.fromEntries(url.searchParams));
+
     // ── Device heartbeat / handshake ──────────────────────────────────────
     if (req.method === "GET" && pathname === "/iclock/cdata") {
-      // The device announces itself here — firmware version, push-protocol
-      // version, capabilities — in query parameters we previously read two of
-      // and discarded the rest. Those discarded values are what say whether
-      // this unit can serve a USERINFO/roster request, a question that has so
-      // far only been answerable by guessing. Recorded (and shipped on the
-      // heartbeat) rather than merely logged, because nobody can read this
-      // machine's log file.
-      recordHandshakeParams(Object.fromEntries(url.searchParams));
-
+      // The device announces itself most fully here — firmware version,
+      // push-protocol version, capabilities. Those values are captured above,
+      // for every request rather than only this one, because this firmware
+      // handshakes on connect and then stops.
       const stamp = getLastSyncedUnixSec();
       const body  = buildHandshakeBody(sn, stamp);
       res.writeHead(200, { "Content-Type": "text/plain" });
