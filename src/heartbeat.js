@@ -38,6 +38,15 @@ const AGENT_STARTED_AT = new Date().toISOString();
  * backend row is the durable record.
  */
 export const agentStats = {
+  /**
+   * The query parameters the device sent on its most recent handshake.
+   *
+   * Kept because nobody can read this machine's log file: the firmware version
+   * and push-protocol version live here and nowhere else, and they are what
+   * decide whether this unit can serve a USERINFO/roster request at all. Being
+   * unable to answer that has already cost several rounds of guessing.
+   */
+  lastHandshakeParams: null,
   lastDeviceContactAt: null, // any ADMS request from the device
   lastPunchPushedAt: null, // last successful forward to the backend
   punchesPushedTotal: 0,
@@ -46,6 +55,21 @@ export const agentStats = {
   lastErrorAt: null,
   deviceSerialNumber: null,
 };
+
+/**
+ * Records the handshake's query parameters, and logs them ONLY when they change.
+ *
+ * The device handshakes every few seconds; logging the set every time would
+ * bury everything else in the file. Logging on change means it appears once at
+ * startup and again only if the device is reconfigured or replaced — which is
+ * exactly when it matters.
+ */
+export function recordHandshakeParams(params) {
+  const serialized = JSON.stringify(params);
+  if (serialized === JSON.stringify(agentStats.lastHandshakeParams)) return;
+  agentStats.lastHandshakeParams = params;
+  logger.info(`ADMS handshake parameters (changed or first seen): ${serialized}`);
+}
 
 export function recordDeviceContact(sn) {
   agentStats.lastDeviceContactAt = new Date().toISOString();
@@ -88,6 +112,9 @@ async function sendHeartbeat({ vpsBaseUrl, deviceAgentToken, agentId, deviceIp, 
       consecutiveUserSyncFailures: agentStats.consecutiveUserSyncFailures,
       lastErrorMessage: agentStats.lastErrorMessage,
       lastErrorAt: agentStats.lastErrorAt,
+      // Surfaces the device's self-reported firmware/protocol details in the
+      // database, so they can be read without access to this machine.
+      lastHandshakeParams: agentStats.lastHandshakeParams,
     }),
   });
   if (!res.ok) {

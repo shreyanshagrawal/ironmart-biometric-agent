@@ -23,7 +23,7 @@
 
 import { createServer } from "http";
 import { logger, describeError } from "./logger.js";
-import { recordDeviceContact } from "./heartbeat.js";
+import { recordDeviceContact, recordHandshakeParams } from "./heartbeat.js";
 
 /**
  * Parse the tab-delimited ATTLOG body the device pushes.
@@ -179,6 +179,15 @@ export function startAdmsServer({ port, onPunchBatch, getLastSyncedUnixSec, onDe
 
     // ── Device heartbeat / handshake ──────────────────────────────────────
     if (req.method === "GET" && pathname === "/iclock/cdata") {
+      // The device announces itself here — firmware version, push-protocol
+      // version, capabilities — in query parameters we previously read two of
+      // and discarded the rest. Those discarded values are what say whether
+      // this unit can serve a USERINFO/roster request, a question that has so
+      // far only been answerable by guessing. Recorded (and shipped on the
+      // heartbeat) rather than merely logged, because nobody can read this
+      // machine's log file.
+      recordHandshakeParams(Object.fromEntries(url.searchParams));
+
       const stamp = getLastSyncedUnixSec();
       const body  = buildHandshakeBody(sn, stamp);
       res.writeHead(200, { "Content-Type": "text/plain" });
